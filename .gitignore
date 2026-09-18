@@ -1,8 +1,6 @@
 /target
-/.venv
 /logs
 /perf/transcription-corpus
-/perf/moonshine-corpus
 /dist
 /.wrangler
 node_modules/

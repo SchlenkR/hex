@@ -10,10 +10,6 @@ runtime settings persist in Application Support.
 
 The distributed release starts in hotkey-dictation-only mode. Voice commands and
 their catalog remain available as a persisted opt-in that defaults off.
-Voice Action also requires its own persisted opt-in, defaulting off even for
-existing settings without an explicit enabled flag.
-`DEVELOPER_FEATURES_ENABLED` keeps meetings and their UI/CLI surfaces available
-only in debug builds.
 
 ## Feature Map
 
@@ -26,8 +22,8 @@ substitute for source inspection or a second roadmap.
 - Update the affected map in the same change when behavior, entry points,
   defaults, prerequisites, platform availability, recovery, or verification
   coverage changes. Do not churn unrelated maps for internal-only refactors.
-- Organize by user capability, not Rust module or UI pane. Dictation, Voice
-  Commands, and Voice Action are distinct features; link shared flows and
+- Organize by user capability, not Rust module or UI pane. Dictation and Voice
+  Commands are distinct features; link shared flows and
   recovery rather than duplicating their descriptions. Keep the index current
   when adding or splitting a feature file.
 - Prefer small action/outcome diagrams in `ts` fences with Unicode tree
@@ -63,7 +59,7 @@ substitute for source inspection or a second roadmap.
   authenticated loopback HTTP through the system curl; request bodies and
   credentials use stdin, never argv or new temporary files.
 - `parakeet`: the strict-Metal `transcribe.cpp` adapter plus bounded inference,
-  processing, ordered output, paste, last-result, and meeting-delta workers.
+  processing, ordered output, paste, and last-result workers.
 - `apple_speech`: the Swift `SpeechAnalyzer` bridge with per-locale support
   checks, asset reservation, and batch transcription.
 - `transcription`: runtime selection and transactional warm-model activation.
@@ -79,12 +75,10 @@ substitute for source inspection or a second roadmap.
   transcription routes.
 - `sdk/typescript`: Promise and Effect v4 host wrappers for direct-child
   lifecycle, authenticated model preparation, and host-audio transcription.
-- `developer_control`: the typed debug-only command/reply protocol the local
-  API uses to drive the running app from `hex dev`.
 - `paste`: clipboard insertion, continuation joins, and generation-safe
   clipboard restoration.
-- `accessibility`: bounded focused-window and selected-text capture through
-  Accessibility without touching the clipboard.
+- `accessibility`: bounded focused-window title capture through Accessibility
+  without touching the clipboard.
 - `recognition`: the semantic coordinator for Moonshine, command mode, hotkey
   and voice-delimited controls, workers, and observations. It does not own the
   authoritative microphone timeline.
@@ -147,19 +141,13 @@ substitute for source inspection or a second roadmap.
   both desktop roots over portable model presentation and platform preparation
   callbacks.
 - `app_window`: the production Settings, Modes with mode-owned corrections and
-  processing, Voice Action, History, and opt-in Commands shell plus
-  developer-only Meetings, Activity, and HUD Lab panes.
+  processing, History, and opt-in Commands shell plus the preview-only Activity
+  and HUD Lab panes.
 - `status_item`: the persistent macOS menu-bar owner for Settings, Paste Last
   Dictation, update checks, and orderly application shutdown.
 - `dictation_indicator`: the click-through Metal/GPUI capture and processing HUD.
-- `meeting`: explicit ScreenCaptureKit capture, owner-only WAV and transcript
-  artifacts, final local-model publication, and recovery.
-- `meeting_live`: bounded dual-stream Moonshine draft transcription and
-  byte-offset transcript tailing.
-- `microphone_activity`: permission-light CoreAudio process input observation.
-- `meeting_detection`: pure provider classification, debounce, and suppression.
-- `meeting_watcher`: GPUI application lifecycle, recognition ownership, meeting
-  offers, and explicit handoff into capture.
+- `app_shell`: GPUI application lifecycle, recognition ownership, the menu bar
+  handoff, and the isolated preview shell.
 - `instance`: the exclusive Application Support lock that prevents concurrent
   command listeners.
 - `feedback`: bounded volume-controlled mode, capture, cancellation, and
@@ -261,20 +249,10 @@ CoreAudio formats, AppleScript details, or event serialization.
   `NotRegistered` and `NotFound` as disabled before registration, represent
   `RequiresApproval` with a link to Login Items settings, and poll macOS as the
   source of truth instead of persisting a parallel Boolean.
-- Voice Action is an optional second capture target. Its saved shortcut defaults
-  to Option-Command, but no shortcut is active or reserved until the user enables
-  Voice Action. Disabling it cancels its active capture, not accepted jobs, and
-  preserves the saved shortcut and model. The toggle remains reachable when
-  OpenCode is unavailable. Promoting an active Option capture preserves all recorded
-  audio. Selected text is optional prompt context; inaccessible or empty
-  selections act as no selection. Use the dedicated OpenCode model and deadline,
-  return only paste-ready text, and paste at the current focus. Failed, empty,
-  cancelled, or timed-out actions paste nothing. Voice Action jobs share normal
-  queueing and cancellation but never update the last dictation.
 - Mode processing is best-effort and ordered: corrections, optional OpenCode
   rewriting, then selected transformations. A failed stage preserves its input;
   the transformation chain is one stage, so failure discards its partial results.
-  It applies to Paste and Send, but not Voice Action or meetings.
+  It applies to Paste and Send.
 - OpenCode availability checks stay off the UI thread. When the app finds the
   `opencode2` executable, `opencode2 api` discovers or starts the managed service;
   the catalog uses authenticated loopback HTTP to avoid large CLI pipe truncation.
@@ -293,10 +271,8 @@ CoreAudio formats, AppleScript details, or event serialization.
   tones; execution failures use an error tone.
 - Clipboard insertion is the fixed text-insertion path. Restore the previous
   clipboard only if no newer paste or external clipboard change superseded it.
-- Option-Shift-V pastes the last completed dictation. Option-Control-V pastes
-  completed meeting turns added since the previous successful invocation.
-- Do not persist captured audio by default. Explicit foreground meeting
-  recording must remain visibly active. Diagnostic dictation retention is an
+- Option-Shift-V pastes the last completed dictation.
+- Do not persist captured audio by default. Diagnostic dictation retention is an
   explicit, bounded, owner-only opt-in through `HEX_RETAIN_DICTATION_AUDIO`.
 - Retained dictation history records only successful pasted output: raw and
   final text plus bounded metadata, never audio, full browser URLs, or window
@@ -305,16 +281,6 @@ CoreAudio formats, AppleScript details, or event serialization.
   Turning retention Off preserves existing entries; clearing history is explicit.
   Time-based retention expires during idle uptime through the shared history
   owner; searches never return expired entries while waiting for disk cleanup.
-- Developer-only meeting detection may inspect process audio metadata but must
-  not capture samples. Detection can offer recording; it must never start
-  automatically. Release builds must not start the meeting controller.
-- Meeting recording prevents idle sleep but does not apply dictation mute or
-  pause-media behavior.
-- Live meeting drafts remain available if final transcription fails. Final
-  publication is atomic; adjacent same-source entries within three seconds form
-  one displayed turn labeled `You` or `Computer`.
-- Meeting paste cursors advance only after successful insertion and reset when
-  HEX restarts.
 - Visible state remains `Transcribing` until every accepted transcription or
   paste output has completed, including ordered post-processing and insertion.
 - The HUD is observational and click-through. It must not alter capture
@@ -391,9 +357,6 @@ direct `npm publish`, after the bootstrap release.
 bun run --cwd sdk/commands build
 cargo run -- listen
 cargo run -- status
-cargo run -- meeting record --title "Design sync"
-cargo run -- meeting probe
-cargo run -- meeting watch --preview
 cargo run -- app --preview-dictation
 cargo run -- preview onboarding
 cargo run -- preview transcription-picker --language zh --model-state installed
@@ -407,8 +370,7 @@ cargo run -- preview transcription-picker --language zh --model-state installed
 ./scripts/capture-preview.sh /tmp/hex-modes-collapsed.png modes --collapse-mode-processing
 ./scripts/capture-preview.sh /tmp/hex-modes-picker.png modes --collapse-mode-processing --open-transformation-picker
 ./scripts/capture-preview.sh /tmp/hex-modes-global.png modes --collapse-mode-processing --select-global-mode
-./scripts/capture-preview.sh /tmp/hex-voice-action-off.png voice-action
-./scripts/capture-preview.sh /tmp/hex-voice-action-unavailable.png voice-action --voice-action-enabled --opencode-unavailable
+./scripts/capture-preview.sh /tmp/hex-modes-opencode-missing.png modes --opencode-unavailable
 HEX_PREVIEW_SKIP_BUILD=1 ./scripts/capture-preview.sh /tmp/hex-modes.png modes
 ./scripts/install-app.sh
 cargo fmt --check
@@ -423,8 +385,8 @@ cd sdk/typescript && bun run check && bun run test && bun run build
 Use `scripts/capture-preview.sh` as the default desktop-UI iteration loop. It
 builds the release binary, launches one isolated deterministic preview, waits
 for that process's `HEX` window, captures only that window, and terminates the
-preview. Targets include `settings`, `modes`, `voice-action`, `commands`,
-`meetings`, `activity`, `onboarding`, `transcription-picker`, `hud-lab`, and
+preview. Targets include `settings`, `modes`, `commands`,
+`activity`, `onboarding`, `transcription-picker`, `hud-lab`, and
 `dictation-hud`. The Modes preview includes representative activation,
 correction, model-variant, and transformation data so it exercises the complete
 editor. Pass `--collapse-mode-processing` to expose the lower transformation
@@ -433,8 +395,7 @@ and deletion states without scrolling. Use `--open-transformation-picker`,
 directly instead of scripting pointer coordinates. After a successful build, set
 `HEX_PREVIEW_SKIP_BUILD=1` for repeated
 captures that do not require recompilation; `HEX_PREVIEW_BINARY` can override
-the release binary path. Keep release previews authoritative for production
-navigation because debug builds expose developer-only panes.
+the release binary path.
 
 The supported Linux beta and release host use x86_64 Arch Linux. Install its
 native build dependencies with:
@@ -528,8 +489,8 @@ the public key compiled into HEX, refuses a non-monotonic stable release, and
 publishes the signed feed last.
 
 Use `termctrl` to verify TUI changes at both wide and narrow dimensions. The
-dashboard keys are `1` for commands, `2` for the activity log, `3` for meetings,
-Tab to cycle, and `q`/Escape to quit.
+dashboard keys are `1` for commands, `2` for the activity log, Tab to cycle,
+and `q`/Escape to quit.
 
 ## Diagnostics
 
@@ -537,8 +498,6 @@ Tab to cycle, and `q`/Escape to quit.
   transcript, command decision, outcome, processing, and context.
 - `~/Library/Application Support/voice-control/logs/process.log`: Rust,
   CoreAudio, Moonshine, and context-adapter diagnostics.
-- `~/Library/Application Support/voice-control/meetings/`: manifests, separate
-  tracks, recoverable live drafts, and atomically published final transcripts.
 
 When diagnosing a missed command, inspect both logs and distinguish microphone
 capture, transcription, command mode/dictation, context matching, command resolution,

@@ -25,9 +25,8 @@ pastes the result into the app you are using.
   ordinary dictation does not require OpenCode or a cloud transcription service.
 - **Your words, your way.** Choose a shortcut, language, and model. Use Modes for
   corrections, application-specific behavior, and optional text processing.
-- **Optional voice tools.** Enable Voice Action or voice commands when you need
-  them. Both start off; provider-backed rewriting is separate from local speech
-  recognition.
+- **Optional voice tools.** Enable voice commands when you need them. They start
+  off; provider-backed rewriting is separate from local speech recognition.
 
 The macOS app is available now. The [Linux beta](#linux-beta) has a smaller feature
 set and requires a source build or Nix. See [Privacy and local data](#privacy-and-local-data)
@@ -102,12 +101,6 @@ the menu. **Manage Models…** opens the full picker for downloads and language 
 [OpenCode V2 beta](https://v2.opencode.ai/) (`opencode2`) is optional. Ordinary
 dictation does not require it.
 
-- **Voice Action:** enable it in the Voice Action pane, then hold
-  **Option-Command** and describe what you want. It defaults off, independently
-  of your dictation shortcut. HEX sends
-  that instruction, selected text when Accessibility makes it available, and
-  the foreground application and Brave website hostname. It pastes the result
-  at the current focus.
 - **Post-processing:** enable OpenCode in Modes to rewrite a transcript before
   paste. HEX sends the transcript, foreground application, and Brave website
   hostname to the configured model provider. Modes can target applications and
@@ -115,8 +108,7 @@ dictation does not require it.
 
 If OpenCode rewriting fails, HEX keeps the corrected local transcript and still
 runs any selected text transformations. If that transformation stage fails, HEX
-keeps the text from before the stage, not partial transformation results. A
-failed Voice Action pastes nothing.
+keeps the text from before the stage, not partial transformation results.
 
 ## Experimental Voice Commands
 
@@ -145,8 +137,7 @@ npx skills add anomalyco/hex --skill hex-personal-commands
 
 - Speech transcription and command recognition run locally.
 - HEX does not save dictation audio by default.
-- On macOS, History retains successfully pasted dictation and Voice Action text
-  for seven days by default, including the local transcript, final text, and
+- On macOS, History retains successfully pasted dictation text for seven days by default, including the local transcript, final text, and
   limited application and timing metadata. It never stores audio, full browser
   URLs, or window titles. Every retention choice has entry and byte limits.
 - Use **History > Keep: Off** to stop adding entries, or **Clear all** to remove
@@ -191,7 +182,7 @@ The Linux beta targets x86_64 Linux on i3/X11 and compatible wlroots Wayland
 compositors. It supports local hotkey dictation, a GPUI settings shell, and
 signed updates for direct installs. Native Wayland requires explicit input-device
 access and compositor support for clipboard, virtual-keyboard, and layer-shell
-protocols. Voice commands and meetings are not included.
+protocols. Voice commands are not included.
 
 Use the [Linux installation guide](docs/linux.md) to build from source until
 the first signed Linux release is published. It also describes the planned

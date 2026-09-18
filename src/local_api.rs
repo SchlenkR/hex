@@ -29,8 +29,7 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HEADERS: usize = 64;
 const MAX_PATH_BYTES: usize = 2 * 1024;
 const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
-const MAX_DEVELOPER_CONTROL_BYTES: usize = 16 * 1024;
-const DEVELOPER_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const DICTATION_CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_DICTATION_SOURCE_BYTES: usize = 128;
 
@@ -110,7 +109,6 @@ struct HttpContext {
     model_preparing: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     transcription: crate::transcription_service::TranscriptionServiceHandle,
-    developer_control: Option<SyncSender<crate::developer_control::DeveloperCall>>,
     dictation_control: Option<SyncSender<crate::recognition::RecognitionControl>>,
     dictation_levels: Arc<Mutex<HashMap<u64, DictationLevels>>>,
 }
@@ -128,7 +126,6 @@ struct CapabilitiesResponse {
     audio_formats: [&'static str; 1],
     partial_transcripts: bool,
     service_capture: bool,
-    developer_control: bool,
 }
 
 impl LocalApi {
@@ -152,24 +149,6 @@ impl LocalApi {
             Some(crate::app_paths::local_api_discovery_file()?),
             Arc::new(current_health),
             events,
-            None,
-            Some(dictation),
-        )?;
-        api._instance = Some(instance);
-        Ok(api)
-    }
-
-    pub fn start_with_developer_control_and_dictation(
-        events: EventLog,
-        developer_control: SyncSender<crate::developer_control::DeveloperCall>,
-        dictation: SyncSender<crate::recognition::RecognitionControl>,
-    ) -> Result<Self> {
-        let instance = crate::instance::acquire("local-api")?;
-        let mut api = Self::start_bound_with(
-            Some(crate::app_paths::local_api_discovery_file()?),
-            Arc::new(current_health),
-            events,
-            Some(developer_control),
             Some(dictation),
         )?;
         api._instance = Some(instance);
@@ -182,27 +161,25 @@ impl LocalApi {
 
     fn start_at(discovery_path: PathBuf, health: HealthProvider, events: EventLog) -> Result<Self> {
         prepare_discovery_path(&discovery_path)?;
-        Self::start_bound(Some(discovery_path), health, events, None)
+        Self::start_bound(Some(discovery_path), health, events)
     }
 
     fn start_without_discovery(health: HealthProvider, events: EventLog) -> Result<Self> {
-        Self::start_bound(None, health, events, None)
+        Self::start_bound(None, health, events)
     }
 
     fn start_bound(
         discovery_path: Option<PathBuf>,
         health: HealthProvider,
         events: EventLog,
-        developer_control: Option<SyncSender<crate::developer_control::DeveloperCall>>,
     ) -> Result<Self> {
-        Self::start_bound_with(discovery_path, health, events, developer_control, None)
+        Self::start_bound_with(discovery_path, health, events, None)
     }
 
     fn start_bound_with(
         discovery_path: Option<PathBuf>,
         health: HealthProvider,
         events: EventLog,
-        developer_control: Option<SyncSender<crate::developer_control::DeveloperCall>>,
         dictation_control: Option<SyncSender<crate::recognition::RecognitionControl>>,
     ) -> Result<Self> {
         let (transcription_service, transcription) =
@@ -243,7 +220,6 @@ impl LocalApi {
             model_preparing: Arc::new(AtomicBool::new(false)),
             shutdown: worker_shutdown,
             transcription,
-            developer_control,
             dictation_control,
             dictation_levels: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -494,21 +470,6 @@ fn http_worker(pending: Arc<Mutex<Receiver<TcpStream>>>, context: Arc<HttpContex
                     tracing::debug!(%error, "transcription client disconnected");
                 }
             }
-            RequestAction::DeveloperControl {
-                content_length,
-                body_prefix,
-            } => {
-                let response = developer_control(
-                    &mut stream,
-                    content_length,
-                    body_prefix,
-                    context.developer_control.as_ref(),
-                    &context.shutdown,
-                );
-                if let Err(error) = write_response(&mut stream, response) {
-                    tracing::debug!(%error, "developer control client disconnected");
-                }
-            }
             RequestAction::DictationStart {
                 content_length,
                 body_prefix,
@@ -557,9 +518,6 @@ fn handle_request(request: HttpRequest, context: &HttpContext) -> RequestAction 
     if request.method == "POST" && path == "/transcriptions" {
         return transcription_action(request, &context.transcription);
     }
-    if request.method == "POST" && path == "/dev/control" {
-        return developer_control_action(request, context.developer_control.is_some());
-    }
     if request.method == "POST" && path == "/dictations" {
         return dictation_start_action(request, context.dictation_control.is_some());
     }
@@ -604,7 +562,6 @@ fn handle_request(request: HttpRequest, context: &HttpContext) -> RequestAction 
                 audio_formats: ["audio/wav"],
                 partial_transcripts: false,
                 service_capture: context.dictation_control.is_some(),
-                developer_control: context.developer_control.is_some(),
             },
         ),
         ("GET", "/models") => match model_infos(&request.path) {
@@ -736,46 +693,6 @@ fn transcription_action(
     }
 }
 
-fn developer_control_action(request: HttpRequest, available: bool) -> RequestAction {
-    if !available {
-        return RequestAction::Respond(HttpResponse::json(
-            404,
-            "Not Found",
-            &serde_json::json!({ "code": "developer-control-unavailable" }),
-        ));
-    }
-    if !request
-        .content_type
-        .as_deref()
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-    {
-        return RequestAction::Respond(HttpResponse::json(
-            415,
-            "Unsupported Media Type",
-            &serde_json::json!({ "code": "unsupported-content-type" }),
-        ));
-    }
-    let Some(content_length) = request.content_length else {
-        return RequestAction::Respond(HttpResponse::json(
-            411,
-            "Length Required",
-            &serde_json::json!({ "code": "length-required" }),
-        ));
-    };
-    if content_length > MAX_DEVELOPER_CONTROL_BYTES {
-        return RequestAction::Respond(HttpResponse::json(
-            413,
-            "Content Too Large",
-            &serde_json::json!({ "code": "developer-control-too-large" }),
-        ));
-    }
-    RequestAction::DeveloperControl {
-        content_length,
-        body_prefix: request.body_prefix,
-    }
-}
-
 fn dictation_start_action(request: HttpRequest, available: bool) -> RequestAction {
     if !available {
         return RequestAction::Respond(HttpResponse::json(
@@ -833,7 +750,7 @@ fn dictation_start(
         &mut body,
         &context.shutdown,
         MAX_DICTATION_SOURCE_BYTES + 32,
-        DEVELOPER_CONTROL_TIMEOUT,
+        CONTROL_TIMEOUT,
     ) {
         return body_read_response(error);
     }
@@ -891,7 +808,7 @@ fn dictation_start(
             &serde_json::json!({ "code": "service-capture-busy" }),
         );
     }
-    match response.recv_timeout(DEVELOPER_CONTROL_TIMEOUT) {
+    match response.recv_timeout(CONTROL_TIMEOUT) {
         Ok(Ok(started)) => {
             context
                 .dictation_levels
@@ -987,7 +904,7 @@ fn dictation_cancel(id: u64, owner_token: String, context: &HttpContext) -> Http
             &serde_json::json!({ "code": "service-capture-busy" }),
         );
     }
-    match response.recv_timeout(DEVELOPER_CONTROL_TIMEOUT) {
+    match response.recv_timeout(CONTROL_TIMEOUT) {
         Ok(Ok(())) => {
             context
                 .dictation_levels
@@ -1098,7 +1015,7 @@ fn stream_dictation_audio(
         );
         return;
     }
-    match response.recv_timeout(DEVELOPER_CONTROL_TIMEOUT) {
+    match response.recv_timeout(CONTROL_TIMEOUT) {
         Ok(Ok(())) => {}
         Ok(Err(code)) => {
             let _ = write_response(
@@ -1162,7 +1079,7 @@ fn dictation_heartbeat(id: u64, owner_token: String, context: &HttpContext) -> H
             &serde_json::json!({ "code": "service-capture-busy" }),
         );
     }
-    match response.recv_timeout(DEVELOPER_CONTROL_TIMEOUT) {
+    match response.recv_timeout(CONTROL_TIMEOUT) {
         Ok(Ok(())) => HttpResponse::empty(204, "No Content"),
         Ok(Err(code)) => HttpResponse::json(409, "Conflict", &serde_json::json!({ "code": code })),
         Err(_) => HttpResponse::json(
@@ -1178,70 +1095,6 @@ fn dictation_path(path: &str) -> Option<(u64, &str)> {
     let id = parts.next()?.parse().ok()?;
     let action = parts.next()?;
     (parts.next().is_none()).then_some((id, action))
-}
-
-fn developer_control(
-    stream: &mut TcpStream,
-    content_length: usize,
-    mut body: Vec<u8>,
-    controls: Option<&SyncSender<crate::developer_control::DeveloperCall>>,
-    shutdown: &AtomicBool,
-) -> HttpResponse {
-    if let Err(error) = read_body_bounded(
-        stream,
-        content_length,
-        &mut body,
-        shutdown,
-        MAX_DEVELOPER_CONTROL_BYTES,
-        DEVELOPER_CONTROL_TIMEOUT,
-    ) {
-        return body_read_response(error);
-    }
-    let Ok(command) = serde_json::from_slice(&body) else {
-        return HttpResponse::json(
-            400,
-            "Bad Request",
-            &serde_json::json!({ "code": "invalid-developer-command" }),
-        );
-    };
-    let Some(controls) = controls else {
-        return HttpResponse::json(
-            404,
-            "Not Found",
-            &serde_json::json!({ "code": "developer-control-unavailable" }),
-        );
-    };
-    let (reply, response) = mpsc::sync_channel(1);
-    match controls.try_send(crate::developer_control::DeveloperCall { command, reply }) {
-        Ok(()) => {}
-        Err(TrySendError::Full(_)) => {
-            return HttpResponse::json(
-                503,
-                "Service Unavailable",
-                &serde_json::json!({ "code": "developer-control-busy" }),
-            );
-        }
-        Err(TrySendError::Disconnected(_)) => {
-            return HttpResponse::json(
-                503,
-                "Service Unavailable",
-                &serde_json::json!({ "code": "developer-control-unavailable" }),
-            );
-        }
-    }
-    match response.recv_timeout(DEVELOPER_CONTROL_TIMEOUT) {
-        Ok(reply) => HttpResponse::json(200, "OK", &reply),
-        Err(RecvTimeoutError::Timeout) => HttpResponse::json(
-            504,
-            "Gateway Timeout",
-            &serde_json::json!({ "code": "developer-ui-timeout" }),
-        ),
-        Err(RecvTimeoutError::Disconnected) => HttpResponse::json(
-            503,
-            "Service Unavailable",
-            &serde_json::json!({ "code": "developer-control-unavailable" }),
-        ),
-    }
 }
 
 fn body_read_response(error: BodyReadError) -> HttpResponse {
@@ -1861,10 +1714,6 @@ enum RequestAction {
         body_prefix: Vec<u8>,
         admission: crate::transcription_service::AudioAdmission,
     },
-    DeveloperControl {
-        content_length: usize,
-        body_prefix: Vec<u8>,
-    },
     DictationStart {
         content_length: usize,
         body_prefix: Vec<u8>,
@@ -2045,62 +1894,6 @@ fn current_health() -> HealthResponse {
     }
 }
 
-#[cfg(debug_assertions)]
-pub fn call_developer(
-    command: &crate::developer_control::DeveloperCommand,
-) -> Result<crate::developer_control::DeveloperReply> {
-    let discovery_path = crate::app_paths::local_api_discovery_file()?;
-    let document: DiscoveryDocument = serde_json::from_slice(
-        &fs::read(&discovery_path)
-            .wrap_err_with(|| format!("could not read {}", discovery_path.display()))?,
-    )
-    .wrap_err("local API discovery is invalid")?;
-    if !valid_discovery(&document) || !discovery_is_live(&document) {
-        bail!("HEX local API is not running");
-    }
-    let body = serde_json::to_vec(command)?;
-    let address = SocketAddr::from(([127, 0, 0, 1], document.port));
-    let mut stream = TcpStream::connect_timeout(&address, CONNECTION_TIMEOUT)
-        .wrap_err("could not connect to HEX local API")?;
-    stream.set_read_timeout(Some(DEVELOPER_CONTROL_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
-    write!(
-        stream,
-        "POST /dev/control HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        document.token,
-        body.len(),
-    )?;
-    stream.write_all(&body)?;
-    stream.flush()?;
-
-    let mut response = Vec::new();
-    (&mut stream)
-        .take(64 * 1024 + 1)
-        .read_to_end(&mut response)?;
-    if response.len() > 64 * 1024 {
-        bail!("HEX developer response is too large");
-    }
-    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
-        bail!("HEX developer response is malformed");
-    };
-    let headers = std::str::from_utf8(&response[..header_end])?;
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_ascii_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .ok_or_else(|| eyre!("HEX developer response has no HTTP status"))?;
-    let body = &response[header_end + 4..];
-    if status != 200 {
-        let code = serde_json::from_slice::<serde_json::Value>(body)
-            .ok()
-            .and_then(|value| value.get("code")?.as_str().map(str::to_owned))
-            .unwrap_or_else(|| format!("http-{status}"));
-        bail!("HEX developer control failed: {code}");
-    }
-    serde_json::from_slice(body).wrap_err("HEX developer response is invalid")
-}
-
 fn generate_token() -> Result<String> {
     let mut random = [0_u8; 32];
     getrandom::fill(&mut random).map_err(|error| eyre!("could not generate API token: {error}"))?;
@@ -2230,7 +2023,6 @@ mod tests {
             serde_json::from_str(response_body(&capabilities)).unwrap();
         assert_eq!(capabilities["partialTranscripts"], false);
         assert_eq!(capabilities["serviceCapture"], false);
-        assert_eq!(capabilities["developerControl"], false);
         assert_eq!(capabilities["audioFormats"][0], "audio/wav");
         let models = request(document.port, Some(&document.token), "/models");
         let models: Vec<serde_json::Value> = serde_json::from_str(response_body(&models)).unwrap();
@@ -2241,20 +2033,9 @@ mod tests {
                 .filter(|model| model.available())
                 .count()
         );
-        assert_eq!(models[0]["id"], "parakeet_unified_en");
+        assert_eq!(models[0]["id"], "parakeet_v3");
         assert!(models[0]["downloadBytes"].is_number());
         assert_eq!(models[0]["supportsLanguageDetection"], false);
-        let whisper = models
-            .iter()
-            .find(|model| model["id"] == "whisper_large_v3_turbo")
-            .unwrap();
-        assert_eq!(whisper["supportsLanguageDetection"], true);
-        assert!(
-            whisper["languages"]
-                .as_array()
-                .unwrap()
-                .contains(&"auto".into())
-        );
         assert!(models.iter().all(|model| model["id"] != "apple_speech"));
         let unknown_model = request_with_method(
             document.port,
@@ -2291,51 +2072,12 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_developer_control_is_bounded_and_typed() {
-        let directory = temp_directory();
-        let events = EventLog::create(&directory.join("events.ndjson")).unwrap();
-        let (sender, controls) = mpsc::sync_channel(1);
-        let mut api =
-            LocalApi::start_bound(None, Arc::new(test_health), events, Some(sender)).unwrap();
-        let port = api.document.port;
-        let token = api.document.token.clone();
-        let client = thread::spawn(move || {
-            let body = r#"{"command":"hud","state":"recording"}"#;
-            raw_request(
-                port,
-                &format!(
-                    "POST /dev/control HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                ),
-            )
-        });
-
-        let call = controls.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(matches!(
-            call.command,
-            crate::developer_control::DeveloperCommand::Hud {
-                state: crate::developer_control::DeveloperHudState::Recording
-            }
-        ));
-        call.reply
-            .send(crate::developer_control::DeveloperReply::Ok)
-            .unwrap();
-        let response = client.join().unwrap();
-        assert!(response.starts_with("HTTP/1.1 200"));
-        assert_eq!(response_body(&response), r#"{"status":"ok"}"#);
-
-        api.shutdown();
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn authenticated_running_app_dictation_streams_observations_and_returns_raw_text() {
         let directory = temp_directory();
         let events = EventLog::create(&directory.join("events.ndjson")).unwrap();
         let (sender, controls) = mpsc::sync_channel(4);
         let mut api =
-            LocalApi::start_bound_with(None, Arc::new(test_health), events, None, Some(sender))
-                .unwrap();
+            LocalApi::start_bound_with(None, Arc::new(test_health), events, Some(sender)).unwrap();
         let port = api.document.port;
         let token = api.document.token.clone();
         let controller = thread::spawn(move || {
@@ -2534,12 +2276,9 @@ mod tests {
 
     #[test]
     fn model_selection_accepts_auto_only_for_detection_models() {
+        assert!(transcription_selection("/transcriptions?model=parakeet_v3&language=en").is_ok());
         assert!(
-            transcription_selection("/transcriptions?model=whisper_large_v3_turbo&language=auto")
-                .is_ok()
-        );
-        assert!(
-            transcription_selection("/transcriptions?model=parakeet_v2&language=auto").is_err()
+            transcription_selection("/transcriptions?model=parakeet_v3&language=auto").is_err()
         );
     }
 
@@ -2780,14 +2519,13 @@ mod tests {
             model_preparing: preparing,
             shutdown: Arc::new(AtomicBool::new(false)),
             transcription,
-            developer_control: None,
             dictation_control: None,
             dictation_levels: Arc::new(Mutex::new(HashMap::new())),
         };
         let action = handle_request(
             HttpRequest {
                 method: "POST".into(),
-                path: "/models/parakeet_v2/prepare".into(),
+                path: "/models/parakeet_v3/prepare".into(),
                 authorization: Some("Bearer test-token".into()),
                 dictation_token: None,
                 content_type: None,
@@ -2837,7 +2575,7 @@ mod tests {
         stream_model_prepare_with(
             &mut stream,
             crate::transcription_models::definition(
-                crate::transcription_models::TranscriptionModelId::ParakeetV2,
+                crate::transcription_models::TranscriptionModelId::ParakeetV3,
             ),
             preparing.clone(),
             &AtomicBool::new(false),

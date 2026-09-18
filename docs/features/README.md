@@ -19,13 +19,13 @@ HEX                                      // macOS release
 ├── Use the result                       // paste, Send, paste-last, History
 ├── Adjust behavior                      // shortcut, microphone, recording preferences
 ├── Process text                         // context-selected Modes
-├── Opt in                               // Voice Action and Commands: separately off
+├── Opt in                               // Commands: off by default
 ├── Recover                              // prove the next attempt works
 └── Maintain the app                     // menu bar, login, updates, quit
 ```
 
-[Dictation](dictation.md), [Voice Commands](commands.md),
-[Voice Action](voice-action.md), and [Recovery](recovery.md) have detailed maps.
+[Dictation](dictation.md), [Voice Commands](commands.md), and
+[Recovery](recovery.md) have detailed maps.
 The other capabilities stay here until they need their own verification recipe.
 
 ## Get Ready
@@ -159,7 +159,7 @@ The desktop root commits through an existing editor to retain unrelated unsaved
 settings, or through persisted settings when no window exists.
 
 Sources: [status_item.rs](../../src/status_item.rs),
-[meeting_watcher.rs](../../src/meeting_watcher.rs), and
+[app_shell.rs](../../src/app_shell.rs), and
 [app_window.rs](../../src/app_window.rs). Key checks are
 `preparation_has_one_worker_and_only_keeps_the_latest_pending_choice`,
 `cancelling_a_completed_unpolled_preparation_never_commits_it`,
@@ -211,7 +211,6 @@ Completed output                         // output
 ├── Paste -> Current focus, in submission order
 ├── Spoken Send -> Paste, then Enter      // requires Commands and voice capture
 ├── Paste Last Dictation                  // menu or Option-Shift-V / saved binding
-│   └── Last completed dictation, not Voice Action
 └── History
     ├── Inspect / search / copy / delete
     ├── Retention -> Seven days by default, always hard-capped
@@ -305,13 +304,6 @@ Update to repair saved selections automatically. For older builds, the workaroun
 is to quit HEX, remove the `.app` suffix from
 `dictation_processing.modes[].applications` in `settings.json`, then relaunch.
 
-## Use Voice Action
-
-[Voice Action](voice-action.md) maps the separate opt-in, hold-only shortcut,
-optional selection, local transcript-to-OpenCode-to-paste path, and cancellation
-boundary. It owns the mode-bypass/last-result rules, checks, and
-[cold modifier-order gap](voice-action.md#cold-modifier-order).
-
 ## Speak Commands
 
 [Voice Commands](commands.md) maps the command opt-in and separate Moonshine
@@ -351,7 +343,7 @@ additional launch-window setting. This applies to normal and login launches,
 does not change login registration, and does not hide an already open window
 when the preference changes. Explicit previews always open their requested pane.
 
-Checks in [meeting_watcher.rs](../../src/meeting_watcher.rs):
+Checks in [app_shell.rs](../../src/app_shell.rs):
 `dockless_startup_stays_quiet_only_when_setup_and_menu_bar_are_ready` and
 `dock_visible_startup_always_opens_the_app` cover the startup decision. The
 existing `on_reopen` and status-item `OpenSettings` paths bypass that decision.
@@ -531,7 +523,7 @@ Linux beta                               // not macOS feature parity
 └── Paste -> Retain transcript clipboard, not restore previous contents
 ```
 
-No Linux Commands, Voice Action, Modes processing, retained History, or meetings.
+No Linux Commands, Modes processing, or retained History.
 `hex listen` instead prints Moonshine transcripts. Wayland needs explicit broad
 input-device access; physical reconnect and click-through still need native
 evidence. Its [smoke](../../scripts/test-wayland-paste.sh) explicitly isolates
@@ -679,31 +671,23 @@ generalized to every SDK cancellation path.
 ## Developer And Prototype Surfaces
 
 ```ts
-macOS debug runtime                      // not release navigation
-├── Meetings -> Explicit recording, separate artifacts, recoverable drafts
-│   └── Detection may offer recording, never start it automatically
-└── Activity / HUD Lab / hex dev -> Observation and developer controls
-
 Desktop previews -> Rendered fixtures    // not proof capture/download/update happened
+├── Activity / HUD Lab -> Preview-only observation panes, hidden from navigation
 iOS prototype -> Record/transcribe/copy and keyboard handoff
 Unmerged Windows / deferred features -> Not part of this map
 ```
 
-Sources: [meeting.rs](../../src/meeting.rs),
-[meeting_watcher.rs](../../src/meeting_watcher.rs),
-[developer_control.rs](../../src/developer_control.rs),
-[capture-preview.sh](../../scripts/capture-preview.sh), [iOS guide](../../ios/README.md).
+Sources: [capture-preview.sh](../../scripts/capture-preview.sh),
+[iOS guide](../../ios/README.md).
 iOS physical-device proof and temporary-WAV failure cleanup remain gaps;
 best-effort deletion is not guaranteed deletion.
 
-`default_paste_hotkeys_follow_build_capabilities` in
+`default_paste_hotkey_is_paste_last` in
 [app_settings.rs](../../src/app_settings.rs) checks the production default runtime
-and settings projections: Paste Last remains available in both build profiles;
-meeting paste is present only in debug. `meeting_paste_is_only_active_in_developer_builds`
-in [suppression.rs](../../src/suppression.rs) checks the corresponding constructed
-hotkey event, including ordinary-chord discard in release. These replace an
-unconditional debug-only expectation and a test-only copy of the reservation rule;
-they do not establish native keyboard delivery or meeting insertion.
+and settings projections: Paste Last is the only default paste shortcut.
+`option_control_v_is_an_ordinary_chord` in [suppression.rs](../../src/suppression.rs)
+checks that the former meeting-paste chord is discarded like any other chord. These
+do not establish native keyboard delivery.
 
 `structural_event_equality_preserves_serialized_identity` in
 [events.rs](../../src/events.rs) covers Activity's full-event equality across

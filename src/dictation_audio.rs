@@ -18,8 +18,6 @@ const MAX_RECOGNITION_BACKLOG: Duration = Duration::from_millis(500);
 
 pub struct RecognitionAudio {
     pub samples: Vec<f32>,
-    captured_through: CaptureInstant,
-    sample_rate: u32,
     generation: u64,
     outstanding_frames: Arc<AtomicU64>,
 }
@@ -27,13 +25,6 @@ pub struct RecognitionAudio {
 impl RecognitionAudio {
     pub fn is_current(&self, generation: u64) -> bool {
         self.generation == generation
-    }
-
-    pub fn captured_from(&self) -> CaptureInstant {
-        let nanos = self.samples.len() as u128 * 1_000_000_000 / u128::from(self.sample_rate);
-        self.captured_through
-            .checked_sub(Duration::from_nanos(nanos as u64))
-            .unwrap_or(self.captured_through)
     }
 }
 
@@ -89,9 +80,7 @@ struct State {
 enum Command {
     Start {
         at: CaptureInstant,
-        voice: bool,
         programmatic: bool,
-        expected_recognition_generation: Option<u64>,
         reply: SyncSender<bool>,
     },
     BecomeIntentional {
@@ -111,13 +100,6 @@ enum Command {
     },
     SetReleaseWhileIdle(bool),
     Shutdown,
-    InvalidateRecognition {
-        reply: SyncSender<u64>,
-    },
-    ConsumeRecognition {
-        expected_generation: u64,
-        reply: SyncSender<bool>,
-    },
 }
 
 struct Owner {
@@ -140,7 +122,6 @@ struct Owner {
 #[derive(Clone, Copy)]
 struct PendingCapture {
     at: CaptureInstant,
-    voice: bool,
     programmatic: bool,
     intentional_at: Option<CaptureInstant>,
 }
@@ -148,7 +129,7 @@ struct PendingCapture {
 impl PendingCapture {
     fn mark_intentional(&mut self, at: CaptureInstant) {
         let became_intentional = self.intentional_at.is_none()
-            && at.duration_since(self.at) >= crate::dictation::MINIMUM_HOLD_DURATION;
+            && at.duration_since(self.at) >= crate::dictation::minimum_hold_duration();
         if became_intentional {
             self.intentional_at = Some(at);
         }
@@ -290,55 +271,26 @@ impl DictationAudio {
         self.state.recognition_generation.load(Ordering::Acquire)
     }
 
-    pub fn invalidate_recognition(&self) -> Result<u64> {
-        let generation = self.call(|reply| Command::InvalidateRecognition { reply })?;
-        self.discard_recognition_backlog();
-        Ok(generation)
-    }
-
-    pub fn consume_recognition(&self, expected_generation: u64) -> Result<bool> {
-        let consumed = self.call(|reply| Command::ConsumeRecognition {
-            expected_generation,
-            reply,
-        })?;
-        if consumed {
-            self.discard_recognition_backlog();
-        }
-        Ok(consumed)
-    }
-
     pub fn discard_recognition_backlog(&self) {
         while self.recognition.try_recv().is_ok() {}
     }
 
     pub fn start(&self, at: CaptureInstant) -> Result<bool> {
-        self.start_capture(at, false, false, None)
+        self.start_capture(at, false)
     }
 
     pub fn start_programmatic(&self, at: CaptureInstant) -> Result<()> {
-        if self.start_capture(at, false, true, None)? {
+        if self.start_capture(at, true)? {
             Ok(())
         } else {
             Err(eyre!("microphone-unavailable"))
         }
     }
 
-    pub fn start_voice(&self, at: CaptureInstant, recognition_generation: u64) -> Result<bool> {
-        self.start_capture(at, true, false, Some(recognition_generation))
-    }
-
-    fn start_capture(
-        &self,
-        at: CaptureInstant,
-        voice: bool,
-        programmatic: bool,
-        expected_recognition_generation: Option<u64>,
-    ) -> Result<bool> {
+    fn start_capture(&self, at: CaptureInstant, programmatic: bool) -> Result<bool> {
         self.call(|reply| Command::Start {
             at,
-            voice,
             programmatic,
-            expected_recognition_generation,
             reply,
         })
     }
@@ -454,9 +406,7 @@ impl Owner {
         match command {
             Command::Start {
                 at,
-                voice,
                 programmatic,
-                expected_recognition_generation,
                 reply,
             } => {
                 // Draining can discover a failure belonging to the previous capture or idle
@@ -464,24 +414,13 @@ impl Owner {
                 if self.input.is_open() && !self.input.is_recovering() {
                     self.drain_through(at);
                 }
-                if self.input.is_recovering()
-                    || expected_recognition_generation.is_some_and(|generation| {
-                        generation != self.recognition_generation
-                            || self.pending_input.oldest().is_some()
-                    })
-                {
+                if self.input.is_recovering() {
                     let _ = reply.send(false);
                     return true;
                 }
-                if expected_recognition_generation.is_some() {
-                    self.next_recognition_generation();
-                    self.recognition_overflowed = false;
-                }
                 self.state.capture_generation.fetch_add(1, Ordering::AcqRel);
                 if self.input.is_open() {
-                    if voice {
-                        self.capture.start_voice_at(at)
-                    } else if programmatic {
+                    if programmatic {
                         self.capture.start_programmatic_at(at)
                     } else {
                         self.capture.start_at(at)
@@ -489,7 +428,6 @@ impl Owner {
                 } else {
                     self.pending_capture = Some(PendingCapture {
                         at,
-                        voice,
                         programmatic,
                         intentional_at: None,
                     });
@@ -533,23 +471,6 @@ impl Owner {
             }
             Command::SetReleaseWhileIdle(release) => {
                 self.release_while_idle = release;
-            }
-            Command::InvalidateRecognition { reply } => {
-                let generation = self.next_recognition_generation();
-                self.recognition_overflowed = false;
-                let _ = reply.send(generation);
-            }
-            Command::ConsumeRecognition {
-                expected_generation,
-                reply,
-            } => {
-                let current = expected_generation == self.recognition_generation
-                    && self.pending_input.oldest().is_none();
-                if current {
-                    self.next_recognition_generation();
-                    self.recognition_overflowed = false;
-                }
-                let _ = reply.send(current);
             }
             Command::Shutdown => return false,
         }
@@ -615,7 +536,7 @@ impl Owner {
                     captured_through,
                     self.pending_input.oldest(),
                 );
-                self.forward_recognition(samples, captured_through);
+                self.forward_recognition(samples);
             }
             RecoveringAudioInputEvent::Timeout => {}
             RecoveringAudioInputEvent::Interrupted => {
@@ -653,9 +574,7 @@ impl Owner {
                     self.input.device_name().to_owned();
                 self.state.recovering.store(false, Ordering::Release);
                 if let Some(pending) = self.pending_capture.take() {
-                    if pending.voice {
-                        self.capture.start_voice_at(pending.at);
-                    } else if pending.programmatic {
+                    if pending.programmatic {
                         self.capture.start_programmatic_at(pending.at);
                     } else {
                         self.capture.start_at(pending.at);
@@ -691,7 +610,7 @@ impl Owner {
         }
     }
 
-    fn forward_recognition(&mut self, samples: Vec<f32>, captured_through: CaptureInstant) {
+    fn forward_recognition(&mut self, samples: Vec<f32>) {
         let frames = samples.len() as u64;
         let max_frames =
             u64::from(self.sample_rate()) * MAX_RECOGNITION_BACKLOG.as_millis() as u64 / 1_000;
@@ -705,8 +624,6 @@ impl Owner {
         }
         let audio = RecognitionAudio {
             samples,
-            captured_through,
-            sample_rate: self.sample_rate(),
             generation: self.recognition_generation,
             outstanding_frames: self.state.outstanding_recognition_frames.clone(),
         };
@@ -855,9 +772,7 @@ mod tests {
     fn start(owner: &mut Owner, at: CaptureInstant) {
         assert!(control(owner, |reply| Command::Start {
             at,
-            voice: false,
             programmatic: false,
-            expected_recognition_generation: None,
             reply,
         }));
     }
@@ -1104,33 +1019,24 @@ mod tests {
     }
 
     #[test]
-    fn start_revalidates_microphone_and_voice_generation_after_boundary_drain() {
-        for interrupted in [false, true] {
-            let (mut owner, input, samples) = owner_for_test(true);
-            let at = capture_time();
-            owner.handle_input(RecoveringAudioInputEvent::Chunk {
-                samples: vec![0.25; 480],
-                captured_through: at,
-            });
-            let boundary = at + Duration::from_millis(110);
-            if interrupted {
-                drop(samples);
-            } else {
-                samples.send((vec![0.25; 480], boundary)).unwrap();
-            }
-            let generation = input.capture_generation();
-            assert!(!control(&mut owner, |reply| Command::Start {
-                at: boundary,
-                voice: !interrupted,
-                programmatic: false,
-                expected_recognition_generation: (!interrupted)
-                    .then_some(input.recognition_generation()),
-                reply,
-            }));
-            assert_eq!(input.capture_generation(), generation);
-            assert!(!input.is_recording());
-            assert!(input.try_recv_event().is_some());
-        }
+    fn start_revalidates_microphone_after_boundary_drain() {
+        let (mut owner, input, samples) = owner_for_test(true);
+        let at = capture_time();
+        owner.handle_input(RecoveringAudioInputEvent::Chunk {
+            samples: vec![0.25; 480],
+            captured_through: at,
+        });
+        let boundary = at + Duration::from_millis(110);
+        drop(samples);
+        let generation = input.capture_generation();
+        assert!(!control(&mut owner, |reply| Command::Start {
+            at: boundary,
+            programmatic: false,
+            reply,
+        }));
+        assert_eq!(input.capture_generation(), generation);
+        assert!(!input.is_recording());
+        assert!(input.try_recv_event().is_some());
     }
 
     #[test]
@@ -1217,10 +1123,10 @@ mod tests {
             assert!(input.start(capture_time()).unwrap());
             assert!(input.is_recording());
             input.set_release_while_idle(true);
-            input.invalidate_recognition().unwrap();
+            assert!(!input.become_intentional(capture_time()).unwrap());
 
             input.set_release_while_idle(false);
-            input.invalidate_recognition().unwrap();
+            assert!(!input.become_intentional(capture_time()).unwrap());
             assert!(!input.is_recovering());
             assert!(input.is_recording());
 
@@ -1232,7 +1138,7 @@ mod tests {
             } else {
                 input.cancel().unwrap();
             }
-            input.invalidate_recognition().unwrap();
+            assert!(!input.become_intentional(capture_time()).unwrap());
             assert!(!input.is_recording());
             assert!(input.is_recovering());
             acknowledge();
@@ -1278,7 +1184,6 @@ mod tests {
         let pressed_at = capture_time();
         let mut pending = PendingCapture {
             at: pressed_at,
-            voice: false,
             programmatic: false,
             intentional_at: None,
         };

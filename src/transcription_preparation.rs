@@ -213,6 +213,7 @@ fn prepare_selection(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     fn selection(model: TranscriptionModelId) -> TranscriptionSelection {
@@ -249,17 +250,17 @@ mod tests {
                 Ok(())
             },
         ));
-        preparation.start(selection(TranscriptionModelId::ParakeetV2), true);
+        preparation.start(selection(TranscriptionModelId::ParakeetV3), true);
         assert_eq!(
             starts.recv_timeout(Duration::from_secs(3)).unwrap(),
-            TranscriptionModelId::ParakeetV2
+            TranscriptionModelId::ParakeetV3
         );
         assert_eq!(preparation.status().downloaded_bytes, 123);
         preparation.start(selection(TranscriptionModelId::ParakeetV3), true);
-        preparation.start(selection(TranscriptionModelId::WhisperLargeV3Turbo), true);
+        preparation.start(selection(TranscriptionModelId::AppleSpeech), true);
         assert_eq!(
             preparation.status().model,
-            Some(TranscriptionModelId::WhisperLargeV3Turbo)
+            Some(TranscriptionModelId::AppleSpeech)
         );
         assert_eq!(preparation.status().downloaded_bytes, 0);
         assert!(starts.try_recv().is_err());
@@ -268,7 +269,7 @@ mod tests {
         loop {
             assert!(preparation.poll().is_none(), "superseded selection escaped");
             if let Ok(model) = starts.try_recv() {
-                assert_eq!(model, TranscriptionModelId::WhisperLargeV3Turbo);
+                assert_eq!(model, TranscriptionModelId::AppleSpeech);
                 break;
             }
             assert!(Instant::now() < deadline);
@@ -277,7 +278,7 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(
             completion(&preparation).unwrap().model,
-            TranscriptionModelId::WhisperLargeV3Turbo
+            TranscriptionModelId::AppleSpeech
         );
         assert!(preparation.status().model.is_none());
         assert!(starts.try_recv().is_err());
@@ -286,7 +287,7 @@ mod tests {
     #[test]
     fn cancelling_a_completed_unpolled_preparation_never_commits_it() {
         let preparation = TranscriptionPreparation::with_prepare(Arc::new(|_, _, _, _| Ok(())));
-        preparation.start(selection(TranscriptionModelId::ParakeetV2), true);
+        preparation.start(selection(TranscriptionModelId::ParakeetV3), true);
         let deadline = Instant::now() + Duration::from_secs(3);
         while !preparation
             .0
@@ -307,25 +308,26 @@ mod tests {
 
     #[test]
     fn preparation_failure_and_worker_panic_allow_a_later_selection() {
-        let preparation =
-            TranscriptionPreparation::with_prepare(Arc::new(|selection, _, _, _| match selection
-                .model
-            {
-                TranscriptionModelId::ParakeetV2 => Err("fixture load failed".into()),
-                TranscriptionModelId::ParakeetV3 => panic!("fixture worker panic"),
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let preparation = TranscriptionPreparation::with_prepare(Arc::new({
+            let attempts = attempts.clone();
+            move |_, _, _, _| match attempts.fetch_add(1, Ordering::Relaxed) {
+                0 => Err("fixture load failed".into()),
+                1 => panic!("fixture worker panic"),
                 _ => Ok(()),
-            }));
-        preparation.start(selection(TranscriptionModelId::ParakeetV2), true);
+            }
+        }));
+        preparation.start(selection(TranscriptionModelId::ParakeetV3), true);
         assert_eq!(completion(&preparation).unwrap_err(), "fixture load failed");
         preparation.start(selection(TranscriptionModelId::ParakeetV3), true);
         assert_eq!(
             completion(&preparation).unwrap_err(),
             "Model preparation worker failed."
         );
-        preparation.start(selection(TranscriptionModelId::WhisperLargeV3Turbo), true);
+        preparation.start(selection(TranscriptionModelId::ParakeetV3), true);
         assert_eq!(
             completion(&preparation).unwrap().model,
-            TranscriptionModelId::WhisperLargeV3Turbo
+            TranscriptionModelId::ParakeetV3
         );
     }
 
@@ -333,11 +335,11 @@ mod tests {
     fn dropping_a_settings_reference_does_not_cancel_application_preparation() {
         let preparation = TranscriptionPreparation::with_prepare(Arc::new(|_, _, _, _| Ok(())));
         let settings_reference = preparation.clone();
-        settings_reference.start(selection(TranscriptionModelId::ParakeetV2), true);
+        settings_reference.start(selection(TranscriptionModelId::ParakeetV3), true);
         drop(settings_reference);
         assert_eq!(
             completion(&preparation).unwrap().model,
-            TranscriptionModelId::ParakeetV2
+            TranscriptionModelId::ParakeetV3
         );
     }
 }

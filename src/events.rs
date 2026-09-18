@@ -112,12 +112,11 @@ pub enum DictationPhase {
     Cancelled,
     Transcribing,
     Pasted,
+    Repasted,
+    // Retained so activity readers can decode records written by older releases.
     Edited,
     VoiceAction,
-    // Retained so activity readers can decode records written by older releases.
     Logged,
-    Repasted,
-    MeetingPasted,
     Failed(String),
 }
 
@@ -257,20 +256,6 @@ impl EventLog {
             phase,
             text: text.into(),
             processing: None,
-        })
-    }
-
-    pub fn processed_dictation(
-        &self,
-        phase: DictationPhase,
-        text: impl Into<String>,
-        processing: Option<DictationProcessing>,
-    ) -> io::Result<()> {
-        self.emit(&VoiceEvent::Dictation {
-            timestamp_ms: now_ms(),
-            phase,
-            text: text.into(),
-            processing,
         })
     }
 }

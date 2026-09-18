@@ -3,19 +3,12 @@ use std::process::Command;
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-            // transcribe-cpp's static manifest records OpenBLAS as an absolute
-            // link argument, which Cargo does not propagate through the -sys
-            // crate to this final binary. Keep it after the static archives so
-            // GNU ld's --as-needed does not discard it before seeing cblas_*.
-            println!("cargo:rustc-link-arg=-lopenblas");
-        }
         return;
     }
     let output = Command::new("xcode-select")
         .arg("-p")
         .output()
-        .expect("xcode-select is required to link ScreenCaptureKit");
+        .expect("xcode-select is required to locate the Swift runtime");
     assert!(output.status.success(), "xcode-select -p failed");
     let developer_dir = String::from_utf8(output.stdout).expect("Xcode path must be UTF-8");
     compile_apple_speech_bridge();

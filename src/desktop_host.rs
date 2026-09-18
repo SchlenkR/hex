@@ -6,51 +6,40 @@ use crate::transcription_models::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) struct DesktopCapabilities {
     pub(crate) activity: bool,
-    pub(crate) commands: bool,
     pub(crate) history: bool,
     pub(crate) hud_lab: bool,
-    pub(crate) meetings: bool,
     pub(crate) modes: bool,
     pub(crate) replacements: bool,
     pub(crate) listener_control: bool,
     pub(crate) update_restart: bool,
-    pub(crate) voice_action: bool,
 }
 
 impl DesktopCapabilities {
     #[cfg(target_os = "macos")]
-    pub(crate) const fn macos(developer_features: bool) -> Self {
+    pub(crate) const fn macos() -> Self {
         Self {
-            activity: developer_features,
-            commands: true,
+            activity: false,
             history: true,
-            hud_lab: developer_features,
-            meetings: developer_features,
+            hud_lab: false,
             modes: true,
             replacements: true,
             listener_control: false,
             update_restart: false,
-            voice_action: true,
         }
     }
 
-    #[cfg(any(target_os = "linux", test))]
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg(test)]
     pub(crate) const fn linux_x11() -> Self {
         Self {
             activity: false,
-            commands: false,
             history: false,
             hud_lab: false,
-            meetings: false,
             modes: false,
             replacements: false,
             listener_control: true,
             update_restart: true,
-            voice_action: false,
         }
     }
 }
@@ -117,7 +106,6 @@ pub(crate) enum DesktopAction {
 }
 
 pub(crate) trait DesktopHost {
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
     fn capabilities(&self) -> DesktopCapabilities;
     fn snapshot(&self) -> DesktopSnapshot;
     fn dispatch(&mut self, action: DesktopAction) -> Result<()>;
@@ -171,15 +159,12 @@ mod tests {
             DesktopCapabilities::linux_x11(),
             DesktopCapabilities {
                 activity: false,
-                commands: false,
                 history: false,
                 hud_lab: false,
-                meetings: false,
                 modes: false,
                 replacements: false,
                 listener_control: true,
                 update_restart: true,
-                voice_action: false,
             }
         );
     }

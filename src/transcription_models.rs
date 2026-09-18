@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -16,27 +17,14 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptionModelId {
     #[default]
-    #[serde(rename = "parakeet_unified_en")]
-    ParakeetUnifiedEnglish,
-    ParakeetV2,
     ParakeetV3,
-    WhisperLargeV3Turbo,
-    Qwen3Asr06B,
-    SenseVoiceSmall,
-    CohereTranscribe,
     AppleSpeech,
 }
 
 impl TranscriptionModelId {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::ParakeetUnifiedEnglish => "parakeet_unified_en",
-            Self::ParakeetV2 => "parakeet_v2",
             Self::ParakeetV3 => "parakeet_v3",
-            Self::WhisperLargeV3Turbo => "whisper_large_v3_turbo",
-            Self::Qwen3Asr06B => "qwen3_asr06_b",
-            Self::SenseVoiceSmall => "sense_voice_small",
-            Self::CohereTranscribe => "cohere_transcribe",
             Self::AppleSpeech => "apple_speech",
         }
     }
@@ -47,13 +35,7 @@ impl FromStr for TranscriptionModelId {
 
     fn from_str(value: &str) -> Result<Self> {
         match value {
-            "parakeet_unified_en" => Ok(Self::ParakeetUnifiedEnglish),
-            "parakeet_v2" => Ok(Self::ParakeetV2),
             "parakeet_v3" => Ok(Self::ParakeetV3),
-            "whisper_large_v3_turbo" => Ok(Self::WhisperLargeV3Turbo),
-            "qwen3_asr06_b" => Ok(Self::Qwen3Asr06B),
-            "sense_voice_small" => Ok(Self::SenseVoiceSmall),
-            "cohere_transcribe" => Ok(Self::CohereTranscribe),
             "apple_speech" => Ok(Self::AppleSpeech),
             _ => bail!("unknown transcription model: {value}"),
         }
@@ -108,29 +90,9 @@ impl Default for TranscriptionSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Recommendation {
-    Recommended,
-    Fastest,
-    MostAccurate,
-    RecognitionHints,
-}
-
-impl Recommendation {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Recommended => "Recommended",
-            Self::Fastest => "Fastest",
-            Self::MostAccurate => "Most accurate",
-            Self::RecognitionHints => "Recognition hints",
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct ModelChoice {
     pub model: &'static ModelDefinition,
-    pub recommendation: Recommendation,
 }
 
 pub struct ModelDefinition {
@@ -189,11 +151,7 @@ impl ModelDefinition {
     }
 
     pub fn runtime_language<'a>(&self, language: &'a str) -> &'a str {
-        if self.id == TranscriptionModelId::WhisperLargeV3Turbo && language == "fil" {
-            "tl"
-        } else {
-            language
-        }
+        language
     }
 
     pub fn runtime_language_hint<'a>(&self, language: &'a str) -> Option<&'a str> {
@@ -231,32 +189,7 @@ const PARAKEET_V3_LANGUAGES: &[&str] = &[
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
     "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk",
 ];
-const QWEN_LANGUAGES: &[&str] = &[
-    "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi", "ja",
-    "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el", "ro", "hu", "mk",
-];
-const COHERE_LANGUAGES: &[&str] = &[
-    "en", "fr", "de", "es", "it", "pt", "nl", "pl", "el", "ar", "ja", "zh", "vi", "ko",
-];
 
-const PARAKEET_V2_ARTIFACT: GgufArtifact = GgufArtifact {
-    filename: "parakeet-tdt-0.6b-v2-Q8_0.gguf",
-    revision: "07cee0616125a08ef619729bb47f40ef747e4bc4",
-    repository: "handy-computer/parakeet-tdt-0.6b-v2-gguf",
-    bytes: 729_574_912,
-    sha256: "f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa",
-    architecture: "parakeet",
-    variant: "tdt-0.6b-v2",
-};
-const PARAKEET_UNIFIED_ENGLISH_ARTIFACT: GgufArtifact = GgufArtifact {
-    filename: "parakeet-unified-en-0.6b-Q8_0.gguf",
-    revision: "7e948f21b7bdbac698d3318db9d350f1096f3b6c",
-    repository: "handy-computer/parakeet-unified-en-0.6b-gguf",
-    bytes: 731_357_568,
-    sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
-    architecture: "parakeet",
-    variant: "unified-en-0.6b",
-};
 const PARAKEET_V3_ARTIFACT: GgufArtifact = GgufArtifact {
     filename: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
     revision: "85ac09ea12fc4b1112fa76810059364bc6adc9de",
@@ -266,74 +199,8 @@ const PARAKEET_V3_ARTIFACT: GgufArtifact = GgufArtifact {
     architecture: "parakeet",
     variant: "tdt-0.6b-v3",
 };
-const WHISPER_ARTIFACT: GgufArtifact = GgufArtifact {
-    filename: "whisper-large-v3-turbo-Q8_0.gguf",
-    revision: "d222c9f621c1128299248f2ded4d8a1820519780",
-    repository: "handy-computer/whisper-large-v3-turbo-gguf",
-    bytes: 886_381_824,
-    sha256: "d5e65f2b0828802ae2c231673d31982cebe3a778c95d9494a9f3efee6bd17448",
-    architecture: "whisper",
-    variant: "whisper-large-v3-turbo",
-};
-const QWEN_ARTIFACT: GgufArtifact = GgufArtifact {
-    filename: "Qwen3-ASR-0.6B-Q8_0.gguf",
-    revision: "e4e16599b900eb0cb36e524514756bb92eb092b7",
-    repository: "handy-computer/Qwen3-ASR-0.6B-gguf",
-    bytes: 850_423_456,
-    sha256: "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
-    architecture: "qwen3_asr",
-    variant: "qwen3-asr-0.6b",
-};
-const SENSEVOICE_ARTIFACT: GgufArtifact = GgufArtifact {
-    filename: "SenseVoiceSmall-Q8_0.gguf",
-    revision: "4a08b8e900b38a977e32eb08d5d0697d6e72ba04",
-    repository: "handy-computer/SenseVoiceSmall-gguf",
-    bytes: 252_684_608,
-    sha256: "6c759ee4c9748c9b3f7a5a60ca74f0f7e685fb9d45d1378fce7cfd62f59adf29",
-    architecture: "sensevoice",
-    variant: "sensevoice-small",
-};
-const COHERE_ARTIFACT: GgufArtifact = GgufArtifact {
-    filename: "cohere-transcribe-03-2026-Q8_0.gguf",
-    revision: "dfa4adebb64f3076b7b6b90b721275cc069cb421",
-    repository: "handy-computer/cohere-transcribe-03-2026-gguf",
-    bytes: 2_410_655_232,
-    sha256: "931916663432fd895423a4291a8400221802b288967ca2d435fc5e3141c9e71e",
-    architecture: "cohere_asr",
-    variant: "cohere-transcribe-03-2026",
-};
 
 pub const MODELS: &[ModelDefinition] = &[
-    ModelDefinition {
-        id: TranscriptionModelId::ParakeetUnifiedEnglish,
-        name: "Parakeet Unified English",
-        realtime: "~163x",
-        realtime_context: "published speed · M4 Max",
-        quality: "1.60%",
-        quality_context: "English benchmark",
-        coverage: "English",
-        timestamps: "Token timestamps",
-        runtime: ModelRuntime::Gguf(&PARAKEET_UNIFIED_ENGLISH_ARTIFACT),
-        languages: &["en"],
-        accepts_language_hint: true,
-        supports_language_detection: false,
-        supports_recognition_hints: false,
-    },
-    ModelDefinition {
-        id: TranscriptionModelId::ParakeetV2,
-        name: "Parakeet v2",
-        realtime: "~55x",
-        realtime_context: "local speed · M2 Max",
-        quality: "1.69%",
-        quality_context: "English benchmark",
-        coverage: "English",
-        timestamps: "Token timestamps",
-        runtime: ModelRuntime::Gguf(&PARAKEET_V2_ARTIFACT),
-        languages: &["en"],
-        accepts_language_hint: true,
-        supports_language_detection: false,
-        supports_recognition_hints: false,
-    },
     ModelDefinition {
         id: TranscriptionModelId::ParakeetV3,
         name: "Parakeet v3",
@@ -347,66 +214,6 @@ pub const MODELS: &[ModelDefinition] = &[
         languages: PARAKEET_V3_LANGUAGES,
         // The pinned v3 artifact detects language from audio and has no prompt input.
         accepts_language_hint: false,
-        supports_language_detection: false,
-        supports_recognition_hints: false,
-    },
-    ModelDefinition {
-        id: TranscriptionModelId::WhisperLargeV3Turbo,
-        name: "Whisper large-v3-turbo",
-        realtime: "~19x",
-        realtime_context: "local speed · M2 Max",
-        quality: "2.01%",
-        quality_context: "English benchmark",
-        coverage: "100 languages",
-        timestamps: "Segment timestamps",
-        runtime: ModelRuntime::Gguf(&WHISPER_ARTIFACT),
-        languages: &["*"],
-        accepts_language_hint: true,
-        supports_language_detection: true,
-        supports_recognition_hints: true,
-    },
-    ModelDefinition {
-        id: TranscriptionModelId::Qwen3Asr06B,
-        name: "Qwen3-ASR 0.6B",
-        realtime: "~16x",
-        realtime_context: "local speed · M2 Max",
-        quality: "7.64%",
-        quality_context: "Mandarin benchmark",
-        coverage: "30 languages",
-        timestamps: "No timestamps",
-        runtime: ModelRuntime::Gguf(&QWEN_ARTIFACT),
-        languages: QWEN_LANGUAGES,
-        accepts_language_hint: true,
-        supports_language_detection: true,
-        supports_recognition_hints: false,
-    },
-    ModelDefinition {
-        id: TranscriptionModelId::SenseVoiceSmall,
-        name: "SenseVoice Small",
-        realtime: "~72x",
-        realtime_context: "local speed · M2 Max",
-        quality: "10.11%",
-        quality_context: "Mandarin benchmark",
-        coverage: "5 languages",
-        timestamps: "No timestamps",
-        runtime: ModelRuntime::Gguf(&SENSEVOICE_ARTIFACT),
-        languages: &["zh", "yue", "en", "ja", "ko"],
-        accepts_language_hint: true,
-        supports_language_detection: true,
-        supports_recognition_hints: false,
-    },
-    ModelDefinition {
-        id: TranscriptionModelId::CohereTranscribe,
-        name: "Cohere Transcribe",
-        realtime: "73x",
-        realtime_context: "published speed · M4 Max",
-        quality: "1.27%",
-        quality_context: "English benchmark",
-        coverage: "14 languages",
-        timestamps: "No timestamps",
-        runtime: ModelRuntime::Gguf(&COHERE_ARTIFACT),
-        languages: COHERE_LANGUAGES,
-        accepts_language_hint: true,
         supports_language_detection: false,
         supports_recognition_hints: false,
     },
@@ -487,78 +294,11 @@ pub fn language_name(code: &str) -> &str {
 }
 
 pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
-    let choice = |id, recommendation| ModelChoice {
-        model: definition(id),
-        recommendation,
-    };
-    match language {
-        AUTO_LANGUAGE => vec![
-            choice(
-                TranscriptionModelId::WhisperLargeV3Turbo,
-                Recommendation::Recommended,
-            ),
-            choice(
-                TranscriptionModelId::SenseVoiceSmall,
-                Recommendation::Fastest,
-            ),
-            choice(
-                TranscriptionModelId::Qwen3Asr06B,
-                Recommendation::Recommended,
-            ),
-        ],
-        "en" => vec![
-            choice(
-                TranscriptionModelId::ParakeetUnifiedEnglish,
-                Recommendation::Recommended,
-            ),
-            choice(
-                TranscriptionModelId::CohereTranscribe,
-                Recommendation::MostAccurate,
-            ),
-            choice(
-                TranscriptionModelId::WhisperLargeV3Turbo,
-                Recommendation::RecognitionHints,
-            ),
-        ],
-        "zh" | "yue" | "ja" | "ko" => vec![
-            choice(
-                TranscriptionModelId::Qwen3Asr06B,
-                Recommendation::Recommended,
-            ),
-            choice(
-                TranscriptionModelId::SenseVoiceSmall,
-                Recommendation::Fastest,
-            ),
-            choice(
-                TranscriptionModelId::WhisperLargeV3Turbo,
-                Recommendation::RecognitionHints,
-            ),
-        ],
-        language if PARAKEET_V3_LANGUAGES.contains(&language) => vec![
-            choice(
-                TranscriptionModelId::ParakeetV3,
-                Recommendation::Recommended,
-            ),
-            choice(
-                TranscriptionModelId::WhisperLargeV3Turbo,
-                Recommendation::RecognitionHints,
-            ),
-        ],
-        language if QWEN_LANGUAGES.contains(&language) => vec![
-            choice(
-                TranscriptionModelId::Qwen3Asr06B,
-                Recommendation::Recommended,
-            ),
-            choice(
-                TranscriptionModelId::WhisperLargeV3Turbo,
-                Recommendation::RecognitionHints,
-            ),
-        ],
-        _ => vec![choice(
-            TranscriptionModelId::WhisperLargeV3Turbo,
-            Recommendation::Recommended,
-        )],
-    }
+    MODELS
+        .iter()
+        .filter(|model| model.supports_language(language))
+        .map(|model| ModelChoice { model })
+        .collect()
 }
 
 pub fn validate(selection: &TranscriptionSelection) -> Result<&'static ModelDefinition> {
@@ -585,8 +325,29 @@ pub fn validate(selection: &TranscriptionSelection) -> Result<&'static ModelDefi
     Ok(model)
 }
 
+static MODELS_DIR_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+
+pub fn set_models_dir(path: Option<&str>) {
+    let path = path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    *MODELS_DIR_OVERRIDE
+        .get_or_init(Default::default)
+        .write()
+        .unwrap_or_else(|error| error.into_inner()) = path;
+}
+
 pub fn models_dir() -> Result<PathBuf> {
-    Ok(crate::app_paths::support_dir()?.join("models"))
+    let override_dir = MODELS_DIR_OVERRIDE
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    match override_dir {
+        Some(path) => Ok(path),
+        None => Ok(crate::app_paths::support_dir()?.join("models")),
+    }
 }
 
 pub fn max_audio_chunk_samples(architecture: &str, max_audio_ms: i64) -> Option<usize> {
@@ -930,167 +691,6 @@ mod tests {
     static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn recommendations_are_language_specific() {
-        let english = choices_for_runtime("en");
-        assert_eq!(
-            english[0].model.id,
-            TranscriptionModelId::ParakeetUnifiedEnglish
-        );
-        assert_eq!(english[0].recommendation, Recommendation::Recommended);
-        assert_eq!(english[1].model.id, TranscriptionModelId::CohereTranscribe);
-        assert_eq!(english[1].recommendation, Recommendation::MostAccurate);
-        let mandarin = choices_for_runtime("zh");
-        assert_eq!(mandarin[0].model.id, TranscriptionModelId::Qwen3Asr06B);
-        assert_eq!(mandarin[1].model.id, TranscriptionModelId::SenseVoiceSmall);
-    }
-
-    #[test]
-    fn model_ids_have_explicit_stable_wire_names() {
-        for (id, name) in [
-            (
-                TranscriptionModelId::ParakeetUnifiedEnglish,
-                "parakeet_unified_en",
-            ),
-            (TranscriptionModelId::ParakeetV2, "parakeet_v2"),
-            (TranscriptionModelId::ParakeetV3, "parakeet_v3"),
-            (
-                TranscriptionModelId::WhisperLargeV3Turbo,
-                "whisper_large_v3_turbo",
-            ),
-            (TranscriptionModelId::Qwen3Asr06B, "qwen3_asr06_b"),
-            (TranscriptionModelId::SenseVoiceSmall, "sense_voice_small"),
-            (TranscriptionModelId::CohereTranscribe, "cohere_transcribe"),
-            (TranscriptionModelId::AppleSpeech, "apple_speech"),
-        ] {
-            assert_eq!(id.as_str(), name);
-            assert_eq!(name.parse::<TranscriptionModelId>().unwrap(), id);
-            assert_eq!(serde_json::to_value(id).unwrap(), name);
-        }
-        assert!("unknown".parse::<TranscriptionModelId>().is_err());
-    }
-
-    #[test]
-    fn apple_speech_is_retained_only_for_persisted_selection_migration() {
-        assert!(
-            choices_for_runtime("en")
-                .iter()
-                .all(|choice| choice.model.id != TranscriptionModelId::AppleSpeech)
-        );
-        let apple_speech = definition(TranscriptionModelId::AppleSpeech);
-        assert!(matches!(apple_speech.runtime, ModelRuntime::AppleSpeech));
-        assert!(!apple_speech.available());
-        assert!(
-            validate(&TranscriptionSelection {
-                model: TranscriptionModelId::AppleSpeech,
-                ..TranscriptionSelection::default()
-            })
-            .is_err()
-        );
-        assert_eq!(apple_speech.download_bytes(), None);
-        assert!(model_path(apple_speech).is_err());
-    }
-
-    #[test]
-    fn selections_require_model_language_compatibility() {
-        assert!(validate(&TranscriptionSelection::default()).is_ok());
-        assert!(
-            validate(&TranscriptionSelection {
-                model: TranscriptionModelId::ParakeetV2,
-                language: "zh".into(),
-                recognition_hints: String::new(),
-            })
-            .is_err()
-        );
-        assert!(
-            validate(&TranscriptionSelection {
-                model: TranscriptionModelId::ParakeetV2,
-                language: AUTO_LANGUAGE.into(),
-                recognition_hints: String::new(),
-            })
-            .is_err()
-        );
-        assert!(
-            validate(&TranscriptionSelection {
-                model: TranscriptionModelId::WhisperLargeV3Turbo,
-                language: AUTO_LANGUAGE.into(),
-                recognition_hints: String::new(),
-            })
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn automatic_language_choices_only_include_detection_models() {
-        let choices = choices_for_runtime(AUTO_LANGUAGE);
-
-        assert!(!choices.is_empty());
-        assert!(
-            choices
-                .iter()
-                .all(|choice| choice.model.supports_language_detection)
-        );
-        assert!(
-            choices
-                .iter()
-                .any(|choice| choice.model.id == TranscriptionModelId::Qwen3Asr06B)
-        );
-        assert!(
-            choices
-                .iter()
-                .any(|choice| choice.model.id == TranscriptionModelId::SenseVoiceSmall)
-        );
-    }
-
-    #[test]
-    fn runtime_language_arguments_distinguish_detection_from_hints() {
-        let whisper = definition(TranscriptionModelId::WhisperLargeV3Turbo);
-        let qwen = definition(TranscriptionModelId::Qwen3Asr06B);
-
-        assert_eq!(whisper.runtime_language_hint(AUTO_LANGUAGE), None);
-        assert_eq!(whisper.runtime_language_hint("fil"), Some("tl"));
-        assert_eq!(qwen.runtime_language_hint(AUTO_LANGUAGE), None);
-        assert_eq!(qwen.runtime_language_hint("zh"), Some("zh"));
-    }
-
-    #[test]
-    fn parakeet_v3_supports_portuguese_without_language_conditioning() {
-        let selection = TranscriptionSelection {
-            model: TranscriptionModelId::ParakeetV3,
-            language: "pt".into(),
-            recognition_hints: String::new(),
-        };
-        let model = validate(&selection).unwrap();
-        assert_eq!(model.id, TranscriptionModelId::ParakeetV3);
-        assert!(
-            choices_for_runtime("pt")
-                .iter()
-                .any(|choice| choice.model.id == model.id)
-        );
-        assert_eq!(model.runtime_language_hint(&selection.language), None);
-        assert_eq!(
-            definition(TranscriptionModelId::WhisperLargeV3Turbo)
-                .runtime_language_hint(&selection.language),
-            Some("pt")
-        );
-        assert!(
-            !choices_for_runtime(AUTO_LANGUAGE)
-                .iter()
-                .any(|choice| choice.model.id == model.id)
-        );
-    }
-
-    #[test]
-    fn recognition_hints_are_whisper_only() {
-        let mut selection = TranscriptionSelection {
-            recognition_hints: "OpenCode".into(),
-            ..TranscriptionSelection::default()
-        };
-        assert!(validate(&selection).is_err());
-        selection.model = TranscriptionModelId::WhisperLargeV3Turbo;
-        assert!(validate(&selection).is_ok());
-    }
-
-    #[test]
     fn artifact_verification_checks_size_and_checksum() {
         const FIXTURE_ARTIFACT: GgufArtifact = GgufArtifact {
             filename: "fixture.gguf",
@@ -1102,7 +702,7 @@ mod tests {
             variant: "fixture",
         };
         let model = ModelDefinition {
-            id: TranscriptionModelId::ParakeetV2,
+            id: TranscriptionModelId::ParakeetV3,
             name: "fixture",
             realtime: "fixture",
             realtime_context: "fixture",
@@ -1140,7 +740,7 @@ mod tests {
             variant: "fixture",
         };
         let model = ModelDefinition {
-            id: TranscriptionModelId::ParakeetV2,
+            id: TranscriptionModelId::ParakeetV3,
             name: "fixture",
             realtime: "fixture",
             realtime_context: "fixture",
@@ -1215,17 +815,5 @@ mod tests {
         fs::remove_file(path).unwrap();
         fs::remove_file(directory.join(".download.lock")).unwrap();
         fs::remove_dir(directory).unwrap();
-    }
-
-    #[test]
-    fn cohere_chunks_at_reference_window_not_encoder_capacity() {
-        assert_eq!(
-            max_audio_chunk_samples("cohere_asr", 400_000),
-            Some(560_000)
-        );
-        assert_eq!(max_audio_chunk_samples("cohere_asr", 0), Some(560_000));
-        assert_eq!(max_audio_chunk_samples("cohere_asr", 10_000), Some(160_000));
-        assert_eq!(max_audio_chunk_samples("whisper", 0), None);
-        assert_eq!(max_audio_chunk_samples("parakeet", 60_000), Some(960_000));
     }
 }

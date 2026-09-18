@@ -38,11 +38,6 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$frameworks"
 cp "$root/target/release/voice-control" "$executable"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
 cp "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$bundle/Contents/Resources/"
-(cd "$root/sdk/commands" && bun run build)
-mkdir -p "$bundle/Contents/Resources/commands-sdk"
-cp "$root/sdk/commands/package.json" "$bundle/Contents/Resources/commands-sdk/"
-/usr/bin/ditto "$root/sdk/commands/dist" "$bundle/Contents/Resources/commands-sdk/dist"
-/usr/bin/ditto "$root/sdk/commands/workspace-template" "$bundle/Contents/Resources/commands-sdk/workspace-template"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$bundle/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$bundle/Contents/Info.plist"
@@ -61,14 +56,6 @@ xcrun actool "$root/app/AppIcon.icon" \
   --notices >&2
 cp "$icon_output/AppIcon.icns" "$icon_output/Assets.car" "$bundle/Contents/Resources/"
 
-set -- "$root"/.venv/lib/python*/site-packages/moonshine_voice
-moonshine_dir=$1
-if [ ! -d "$moonshine_dir" ]; then
-  echo "Moonshine is not installed. Run ./scripts/setup.sh." >&2
-  exit 1
-fi
-cp "$moonshine_dir/libmoonshine.dylib" "$frameworks/"
-cp "$moonshine_dir/libonnxruntime.1.23.2.dylib" "$frameworks/"
 /usr/bin/ditto "$sparkle_dir/Sparkle.framework" "$frameworks/Sparkle.framework"
 
 sparkle="$frameworks/Sparkle.framework/Versions/B"
@@ -77,8 +64,6 @@ codesign --force --timestamp --options runtime --preserve-metadata=entitlements 
 codesign --force --timestamp --options runtime --sign "$identity" "$sparkle/Autoupdate"
 codesign --force --timestamp --options runtime --sign "$identity" "$sparkle/Updater.app"
 codesign --force --timestamp --options runtime --sign "$identity" "$frameworks/Sparkle.framework"
-codesign --force --timestamp --options runtime --sign "$identity" "$frameworks/libonnxruntime.1.23.2.dylib"
-codesign --force --timestamp --options runtime --sign "$identity" "$frameworks/libmoonshine.dylib"
 codesign --force --timestamp --options runtime --entitlements "$root/app/VoiceControl.entitlements" --sign "$identity" "$bundle"
 codesign --verify --deep --strict --verbose=2 "$bundle"
 echo "$bundle"

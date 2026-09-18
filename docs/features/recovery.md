@@ -154,8 +154,7 @@ Checks in [dictation_audio.rs](../../src/dictation_audio.rs):
 `cold_capture_restart_rejects_late_open_results_and_closes_after_finish`,
 `enabling_warm_microphone_preserves_pending_capture_and_recovers_after_cancellation`.
 Proof limit: controlled asynchronous opener and capture ownership, not onset
-latency or the macOS microphone indicator. Cold Voice Action has a separate gap
-below.
+latency or the macOS microphone indicator.
 
 ### Fence Late Capture Notifications
 
@@ -206,8 +205,7 @@ Sources: [dictation_audio.rs](../../src/dictation_audio.rs),
 Proof limit: source-backed contract only. A whole-path native stall check must
 still establish lossless dictation and stale-command rejection together.
 
-`recover.optional-processing`: ordinary dictation falls back to usable text;
-Voice Action does not substitute a transcript for a failed action.
+`recover.optional-processing`: ordinary dictation falls back to usable text.
 
 ```ts
 ordinary dictation -> corrections -> optional rewrite -> transformations -> paste
@@ -216,8 +214,7 @@ ordinary dictation -> corrections -> optional rewrite -> transformations -> past
                              rewrite fails       chain fails
                              -> corrected text   -> chain's input // discard partial results
 
-Voice Action fails -> paste nothing                    // different contract, no fallback
-either path -> later request -> expected output         // recovery still needs observation
+later request -> expected output                        // recovery still needs observation
 ```
 Stage-specific sources, checks, and the known host failure are in the
 [index](README.md); late native replies are also covered below.
@@ -264,7 +261,7 @@ Headless lookup without snapshot -> shared native lock -> current layout query
 Concurrent snapshot construction -> same lock          // serialized, not a separate race
 ```
 Sources: [keyboard.rs](../../src/keyboard.rs),
-[meeting_watcher.rs](../../src/meeting_watcher.rs).
+[app_shell.rs](../../src/app_shell.rs).
 The lock alone is not GUI thread safety: successful main-thread prewarming and
 pure cached misses prevent later GUI workers from querying native layout APIs.
 The GUI snapshot remains fixed until restart. CLI lookups without a snapshot
@@ -375,19 +372,6 @@ Reports: [#53](https://github.com/anomalyco/hex/issues/53),
 [#54](https://github.com/anomalyco/hex/issues/54).
 Proof limit: existing ownership/timing tests do not establish these native
 failure causes; a current hold-to-result sequence is still needed.
-
-### Cold Voice Action
-
-```ts
-Command-first -> start_pending_voice_action -> intentional threshold -> open mic
-Option-first  -> already-started capture -> promote to Voice Action
-
-ordinary cold-dictation checks -> both Voice Action orders // NOT established
-```
-Source: [recognition.rs](../../src/recognition.rs), `start_pending_voice_action`;
-issue [#23](https://github.com/anomalyco/hex/issues/23).
-Missing evidence: both modifier orders with a controlled opener, followed by
-native onset evidence.
 
 ### Late Native Tool Reply
 

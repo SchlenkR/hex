@@ -303,40 +303,6 @@ pub fn update_transcription(settings: &AppSettings, status: &PreparationStatus) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcription_models::TranscriptionSelection;
-
-    #[test]
-    fn model_menu_only_lists_downloaded_models_with_their_remembered_language() {
-        let mut settings = AppSettings::default();
-        settings.remember_transcription(TranscriptionSelection {
-            model: TranscriptionModelId::WhisperLargeV3Turbo,
-            language: "fr".into(),
-            recognition_hints: String::new(),
-        });
-        settings.remember_transcription(TranscriptionSelection::default());
-        let installed = |model: &ModelDefinition, _: &str| {
-            matches!(
-                model.id,
-                TranscriptionModelId::ParakeetUnifiedEnglish
-                    | TranscriptionModelId::WhisperLargeV3Turbo
-            )
-        };
-        let entries = model_menu_entries(&settings, false, installed);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].title, "Parakeet Unified English · English");
-        assert!(entries[0].selected);
-        assert!(!entries[0].enabled);
-        assert_eq!(entries[1].title, "Whisper large-v3-turbo · French");
-        assert!(!entries[1].selected);
-        assert!(entries[1].enabled);
-        let preparing = model_menu_entries(&settings, true, installed);
-        assert!(preparing.iter().all(|entry| !entry.enabled));
-        assert!(
-            preparing[0].selected,
-            "preparing must not mark the candidate selected"
-        );
-        assert!(model_menu_entries(&settings, false, |_, _| false).is_empty());
-    }
 
     #[test]
     fn menu_tags_only_resolve_available_catalog_models() {

@@ -1,40 +1,29 @@
 #[cfg(target_os = "macos")]
 mod accessibility;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod app_paths;
 #[cfg(target_os = "macos")]
 mod app_settings;
+#[cfg(target_os = "macos")]
+mod app_shell;
 #[cfg(target_os = "macos")]
 mod app_window;
 #[cfg(target_os = "macos")]
 mod apple_speech;
 #[cfg(target_os = "macos")]
 mod application_catalog;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod audio;
-#[cfg(target_os = "macos")]
-mod command_grammar;
-#[cfg(target_os = "macos")]
-mod commands;
 #[cfg(target_os = "macos")]
 mod config;
 #[cfg(target_os = "macos")]
 mod context;
-#[cfg(all(debug_assertions, target_os = "macos"))]
-mod dashboard;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod desktop_activity;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-mod desktop_host;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod desktop_transcription_picker;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-mod desktop_ui;
 #[cfg(target_os = "macos")]
-mod developer_control;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+mod desktop_activity;
+#[cfg(target_os = "macos")]
+mod desktop_host;
+#[cfg(target_os = "macos")]
+mod desktop_transcription_picker;
+#[cfg(target_os = "macos")]
+mod desktop_ui;
 mod dictation;
 #[cfg(target_os = "macos")]
 mod dictation_audio;
@@ -44,55 +33,17 @@ mod dictation_diagnostics;
 mod dictation_indicator;
 #[cfg(target_os = "macos")]
 pub mod dictation_processor;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod events;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "macos")]
 mod feedback;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod history;
 mod instance;
 #[cfg(target_os = "macos")]
 mod keyboard;
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-mod linux_app;
-#[cfg(target_os = "linux")]
-mod linux_desktop;
-#[cfg(target_os = "linux")]
-mod linux_dictation;
-#[cfg(target_os = "linux")]
-mod linux_input;
-#[cfg(target_os = "linux")]
-mod linux_paste;
-#[cfg(target_os = "linux")]
-mod linux_service;
-#[cfg(target_os = "linux")]
-mod linux_session;
-#[cfg(target_os = "linux")]
-mod linux_settings;
-#[cfg(target_os = "linux")]
-mod linux_transcriber;
-#[cfg(target_os = "linux")]
-mod linux_updater;
-#[cfg(target_os = "linux")]
-mod linux_wayland_input;
 #[cfg(target_os = "macos")]
 mod local_api;
 #[cfg(target_os = "macos")]
 mod login_item;
-#[cfg(target_os = "macos")]
-mod meeting;
-#[cfg(target_os = "macos")]
-mod meeting_detection;
-#[cfg(target_os = "macos")]
-mod meeting_watcher;
-#[cfg(target_os = "macos")]
-mod microphone_activity;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
-mod moonshine;
-#[cfg(all(target_os = "macos", debug_assertions))]
-mod moonshine_lab;
 #[cfg(target_os = "macos")]
 mod onboarding;
 #[cfg(target_os = "macos")]
@@ -102,15 +53,11 @@ mod paste;
 #[cfg(target_os = "macos")]
 mod permission_guide;
 #[cfg(target_os = "macos")]
-mod personal_commands;
-#[cfg(target_os = "macos")]
 mod recognition;
 #[cfg(target_os = "macos")]
 mod recording_environment;
 #[cfg(target_os = "macos")]
 mod sparkle;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod spoken_text;
 #[cfg(target_os = "macos")]
 mod status_item;
 #[cfg(target_os = "macos")]
@@ -123,7 +70,6 @@ mod text_replacements;
 mod transcription;
 #[cfg(target_os = "macos")]
 mod transcription_benchmark;
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 mod transcription_models;
 #[cfg(target_os = "macos")]
 mod transcription_preparation;
@@ -159,8 +105,6 @@ struct Cli {
 }
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-#[cfg(target_os = "macos")]
-pub(crate) const DEVELOPER_FEATURES_ENABLED: bool = cfg!(debug_assertions);
 
 #[cfg(target_os = "macos")]
 #[derive(Subcommand)]
@@ -185,36 +129,18 @@ enum Command {
         /// Deterministic model installation state shown by the picker.
         #[arg(long, value_enum, default_value = "actual")]
         model_state: AppPreviewModelState,
-        /// Collapse OpenCode settings in the representative Modes preview.
-        #[arg(long)]
-        collapse_mode_processing: bool,
-        /// Open the transformation picker in the representative Modes preview.
-        #[arg(long)]
-        open_transformation_picker: bool,
         /// Select the Global row in the representative Modes preview.
         #[arg(long)]
         select_global_mode: bool,
-        /// Enable Voice Action in the preview; it is off by default.
-        #[arg(long)]
-        voice_action_enabled: bool,
-        /// Preview OpenCode-dependent controls without an available installation.
-        #[arg(long)]
-        opencode_unavailable: bool,
         /// Show missing post-onboarding permissions in Settings.
         #[arg(long)]
         permissions_missing: bool,
         /// Show the selected dictation model as missing without changing local files.
         #[arg(long)]
         model_missing: bool,
-        /// Show command-model recovery while dictation remains ready.
-        #[arg(long)]
-        command_model_missing: bool,
         /// Open the explicit history retention choices in the History preview.
         #[arg(long)]
         open_history_retention: bool,
-        /// Show the idle microphone release confirmation with Commands enabled.
-        #[arg(long)]
-        confirm_release_microphone: bool,
         /// Show the sidebar update action without starting the updater.
         #[arg(long)]
         update_available: bool,
@@ -225,32 +151,12 @@ enum Command {
         #[arg(long)]
         device: Option<String>,
     },
-    /// Manage the personal command workspace.
-    Commands {
-        #[command(subcommand)]
-        command: CommandsCommand,
-    },
     /// Run the headless local API service.
     #[command(hide = true)]
     Service {
         /// Run as a direct child whose stdin is owned by the host application.
         #[arg(long)]
         embedded: bool,
-    },
-    #[cfg(debug_assertions)]
-    /// Show the developer recognition dashboard.
-    Status,
-    #[cfg(debug_assertions)]
-    /// Inspect and control the running desktop app.
-    Dev {
-        #[command(subcommand)]
-        command: DevCommand,
-    },
-    #[cfg(debug_assertions)]
-    /// Record, transcribe, and browse local meetings.
-    Meeting {
-        #[command(subcommand)]
-        command: MeetingCommand,
     },
     /// Measure the local transcription runtime against a fixed WAV corpus.
     #[command(hide = true)]
@@ -270,19 +176,6 @@ enum Command {
         #[arg(long, default_value_t = 7)]
         runs: usize,
     },
-    #[cfg(debug_assertions)]
-    /// Record and evaluate command-recognition fixtures interactively.
-    MoonshineLab {
-        /// Corpus directory containing manifest.json and audio/*.wav.
-        #[arg(default_value = "perf/moonshine-corpus")]
-        directory: PathBuf,
-        /// Override the configured microphone preference order.
-        #[arg(long)]
-        device: Option<String>,
-        /// Evaluate every recorded fixture across every Moonshine profile.
-        #[arg(long)]
-        batch: bool,
-    },
 }
 
 #[cfg(target_os = "macos")]
@@ -293,68 +186,6 @@ enum TranscriptionBenchmarkBackend {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Subcommand)]
-enum CommandsCommand {
-    /// Create or refresh ~/.config/hex and install its pinned dependencies.
-    Init,
-}
-
-#[cfg(debug_assertions)]
-#[cfg(target_os = "macos")]
-#[derive(Subcommand)]
-enum DevCommand {
-    /// Inspect the running app and window state.
-    Status,
-    /// Drive a deterministic HUD state.
-    Hud {
-        #[arg(value_enum)]
-        state: DevHudState,
-    },
-    /// Open the app and select a pane.
-    Show {
-        #[arg(value_enum)]
-        pane: DevPane,
-    },
-    /// Enable or disable voice commands.
-    Commands {
-        #[arg(value_enum)]
-        state: DevToggle,
-    },
-}
-
-#[cfg(debug_assertions)]
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, ValueEnum)]
-enum DevHudState {
-    Reset,
-    Recording,
-    Transcribing,
-    Processing,
-}
-
-#[cfg(debug_assertions)]
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, ValueEnum)]
-enum DevPane {
-    Settings,
-    Modes,
-    VoiceAction,
-    Replacements,
-    HudLab,
-    Commands,
-    Meetings,
-    Activity,
-}
-
-#[cfg(debug_assertions)]
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, ValueEnum)]
-enum DevToggle {
-    On,
-    Off,
-}
-
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, ValueEnum)]
 enum AppPreviewTarget {
     DictationHud,
@@ -362,10 +193,7 @@ enum AppPreviewTarget {
     Onboarding,
     Settings,
     Modes,
-    VoiceAction,
     Replacements,
-    Commands,
-    Meetings,
     Activity,
     History,
     TranscriptionPicker,
@@ -379,30 +207,6 @@ enum AppPreviewModelState {
     Missing,
     Downloading,
     Error,
-}
-
-#[cfg(debug_assertions)]
-#[cfg(target_os = "macos")]
-#[derive(Subcommand)]
-enum MeetingCommand {
-    /// Record microphone and system audio until Ctrl-C.
-    Record {
-        /// Human-readable meeting title.
-        #[arg(long)]
-        title: Option<String>,
-    },
-    /// List recorded meetings.
-    List,
-    /// Print one meeting transcript.
-    Show { id: String },
-    /// Watch supported meeting applications and offer local recording.
-    Watch {
-        /// Show a non-recording UI preview immediately.
-        #[arg(long)]
-        preview: bool,
-    },
-    /// Print applications currently using microphone input.
-    Probe,
 }
 
 #[cfg(target_os = "macos")]
@@ -448,10 +252,9 @@ fn main() -> Result<()> {
             preview_dictation,
         } => {
             let _instance = instance::acquire("listener")?;
-            meeting_watcher::run(
+            app_shell::run(
                 &SHUTDOWN,
-                false,
-                (!preview_dictation).then_some(meeting_watcher::ListenerConfig {
+                (!preview_dictation).then_some(app_shell::ListenerConfig {
                     project_root: root,
                     event_path,
                     device,
@@ -463,20 +266,14 @@ fn main() -> Result<()> {
             target,
             language,
             model_state,
-            collapse_mode_processing,
-            open_transformation_picker,
             select_global_mode,
-            voice_action_enabled,
-            opencode_unavailable,
             permissions_missing,
             model_missing,
-            command_model_missing,
             open_history_retention,
-            confirm_release_microphone,
             update_available,
         } => {
             if matches!(target, AppPreviewTarget::DictationHud) {
-                return meeting_watcher::run(&SHUTDOWN, false, None, true);
+                return app_shell::run(&SHUTDOWN, None, true);
             }
             if !transcription_models::LANGUAGES
                 .iter()
@@ -490,10 +287,7 @@ fn main() -> Result<()> {
                 | AppPreviewTarget::Settings
                 | AppPreviewTarget::TranscriptionPicker => app_window::PreviewPane::Settings,
                 AppPreviewTarget::Modes => app_window::PreviewPane::Modes,
-                AppPreviewTarget::VoiceAction => app_window::PreviewPane::VoiceAction,
                 AppPreviewTarget::Replacements => app_window::PreviewPane::Replacements,
-                AppPreviewTarget::Commands => app_window::PreviewPane::Commands,
-                AppPreviewTarget::Meetings => app_window::PreviewPane::Meetings,
                 AppPreviewTarget::Activity => app_window::PreviewPane::Activity,
                 AppPreviewTarget::History => app_window::PreviewPane::History,
                 AppPreviewTarget::DictationHud => unreachable!(),
@@ -505,23 +299,17 @@ fn main() -> Result<()> {
                 AppPreviewModelState::Downloading => app_window::PreviewModelState::Downloading,
                 AppPreviewModelState::Error => app_window::PreviewModelState::Error,
             };
-            meeting_watcher::preview_shell(
+            app_shell::preview_shell(
                 &SHUTDOWN,
                 app_window::AppWindowPreview {
                     pane,
                     transcription_picker: matches!(target, AppPreviewTarget::TranscriptionPicker)
                         .then_some((language, model_state)),
                     onboarding: matches!(target, AppPreviewTarget::Onboarding),
-                    collapse_mode_processing,
-                    open_transformation_picker,
                     select_global_mode,
-                    voice_action_enabled,
-                    opencode_unavailable,
                     permissions_missing,
                     model_missing,
-                    command_model_missing,
                     open_history_retention,
-                    confirm_release_microphone,
                     update_available,
                 },
             )
@@ -537,17 +325,7 @@ fn main() -> Result<()> {
                     None
                 }
             };
-            recognition::listen(
-                &root,
-                events,
-                device.as_deref(),
-                config::voice_control(),
-                &SHUTDOWN,
-                None,
-                None,
-                history,
-                None,
-            )
+            recognition::listen(events, device.as_deref(), &SHUTDOWN, None, history, None)
         }
         Command::Service { embedded } => {
             if !embedded {
@@ -607,91 +385,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Commands {
-            command: CommandsCommand::Init,
-        } => {
-            let workspace = personal_commands::initialize_workspace()?;
-            println!("{}", workspace.display());
-            Ok(())
-        }
-        #[cfg(debug_assertions)]
-        Command::Status => dashboard::run(event_path, config::voice_control()),
-        #[cfg(debug_assertions)]
-        Command::Dev { command } => {
-            use developer_control::{
-                DeveloperCommand, DeveloperHudState as RpcHudState, DeveloperPane as RpcPane,
-                DeveloperReply,
-            };
-            let command = match command {
-                DevCommand::Status => DeveloperCommand::Status,
-                DevCommand::Hud { state } => DeveloperCommand::Hud {
-                    state: match state {
-                        DevHudState::Reset => RpcHudState::Reset,
-                        DevHudState::Recording => RpcHudState::Recording,
-                        DevHudState::Transcribing => RpcHudState::Transcribing,
-                        DevHudState::Processing => RpcHudState::Processing,
-                    },
-                },
-                DevCommand::Show { pane } => DeveloperCommand::ShowPane {
-                    pane: match pane {
-                        DevPane::Settings => RpcPane::Settings,
-                        DevPane::Modes => RpcPane::Modes,
-                        DevPane::VoiceAction => RpcPane::VoiceAction,
-                        DevPane::Replacements => RpcPane::Replacements,
-                        DevPane::HudLab => RpcPane::HudLab,
-                        DevPane::Commands => RpcPane::Commands,
-                        DevPane::Meetings => RpcPane::Meetings,
-                        DevPane::Activity => RpcPane::Activity,
-                    },
-                },
-                DevCommand::Commands { state } => DeveloperCommand::SetCommandsEnabled {
-                    enabled: matches!(state, DevToggle::On),
-                },
-            };
-            let reply = local_api::call_developer(&command)?;
-            if let DeveloperReply::Error { code, message } = &reply {
-                return Err(eyre!("{code}: {message}"));
-            }
-            println!("{}", serde_json::to_string_pretty(&reply)?);
-            Ok(())
-        }
-        #[cfg(debug_assertions)]
-        Command::Meeting {
-            command: MeetingCommand::Record { title },
-        } => {
-            app_settings::AppSettings::load()?;
-            meeting::record(title, &SHUTDOWN, &root, None).map(|_| ())
-        }
-        #[cfg(debug_assertions)]
-        Command::Meeting {
-            command: MeetingCommand::List,
-        } => {
-            for meeting in meeting::list()? {
-                println!(
-                    "{}\t{:?}\t{}ms\t{}",
-                    meeting.id,
-                    meeting.status,
-                    meeting.duration_ms.unwrap_or_default(),
-                    meeting.title
-                );
-            }
-            Ok(())
-        }
-        #[cfg(debug_assertions)]
-        Command::Meeting {
-            command: MeetingCommand::Show { id },
-        } => {
-            print!("{}", meeting::show(&id)?);
-            Ok(())
-        }
-        #[cfg(debug_assertions)]
-        Command::Meeting {
-            command: MeetingCommand::Watch { preview },
-        } => meeting_watcher::run(&SHUTDOWN, preview, None, false),
-        #[cfg(debug_assertions)]
-        Command::Meeting {
-            command: MeetingCommand::Probe,
-        } => meeting_watcher::probe(),
         Command::BenchmarkTranscription {
             manifest,
             backend,
@@ -712,15 +405,6 @@ fn main() -> Result<()> {
             };
             transcription_benchmark::run(&manifest, warmups, runs, backend)
         }
-        #[cfg(debug_assertions)]
-        Command::MoonshineLab {
-            directory,
-            device,
-            batch,
-        } => match batch {
-            true => moonshine_lab::run_batch(&root, &directory),
-            false => moonshine_lab::run(&root, &directory, device.as_deref()),
-        },
     }
 }
 
@@ -733,58 +417,6 @@ fn is_bundled_app_executable(name: Option<&std::ffi::OsStr>) -> bool {
 mod tests {
     use super::{Cli, Command, is_bundled_app_executable};
     use clap::Parser;
-
-    #[test]
-    fn voice_action_preview_requires_explicit_opt_in() {
-        let cli = Cli::try_parse_from(["hex", "preview", "voice-action"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Preview {
-                voice_action_enabled: false,
-                opencode_unavailable: false,
-                ..
-            })
-        ));
-
-        let cli = Cli::try_parse_from([
-            "hex",
-            "preview",
-            "voice-action",
-            "--voice-action-enabled",
-            "--opencode-unavailable",
-        ])
-        .unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Preview {
-                voice_action_enabled: true,
-                opencode_unavailable: true,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn microphone_confirmation_requires_an_explicit_preview_flag() {
-        for (args, expected) in [
-            (vec!["hex", "preview", "settings"], false),
-            (
-                vec!["hex", "preview", "settings", "--confirm-release-microphone"],
-                true,
-            ),
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
-            let Some(Command::Preview {
-                confirm_release_microphone,
-                ..
-            }) = cli.command
-            else {
-                panic!("expected preview command");
-            };
-            assert_eq!(confirm_release_microphone, expected);
-        }
-        assert!(Cli::try_parse_from(["hex", "app", "--confirm-release-microphone"]).is_err());
-    }
 
     #[test]
     fn available_update_requires_an_explicit_preview_flag() {
@@ -816,9 +448,4 @@ mod tests {
         assert!(!is_bundled_app_executable(Some("voice-control".as_ref())));
         assert!(!is_bundled_app_executable(Some("hex-service".as_ref())));
     }
-}
-
-#[cfg(target_os = "linux")]
-fn main() -> Result<()> {
-    linux::run(&SHUTDOWN)
 }

@@ -4,39 +4,6 @@ use std::sync::{Mutex, OnceLock};
 
 use color_eyre::eyre::{Result, eyre};
 
-#[derive(Clone, Copy, Debug)]
-pub enum Key {
-    Character(char),
-    Home,
-    End,
-    Up,
-    Down,
-    Left,
-    Right,
-    Enter,
-    #[allow(dead_code)]
-    Escape,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Modifiers(u8);
-
-impl Modifiers {
-    pub const NONE: Self = Self(0);
-    pub const COMMAND: Self = Self(1 << 0);
-    pub const SHIFT: Self = Self(1 << 1);
-    pub const OPTION: Self = Self(1 << 2);
-    pub const CONTROL: Self = Self(1 << 3);
-
-    pub const fn with(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    fn contains(self, other: Self) -> bool {
-        self.0 & other.0 != 0
-    }
-}
-
 type InputSourceRef = *const c_void;
 type EventRef = *mut c_void;
 
@@ -45,11 +12,9 @@ const NO_DEAD_KEYS: isize = 0;
 const HID_EVENT_TAP: u32 = 0;
 const COMMAND_KEY_CODE: u16 = 55;
 const COMMAND_FLAG: u64 = 1 << 20;
-const SHIFT_KEY_CODE: u16 = 56;
-const SHIFT_FLAG: u64 = 1 << 17;
-const OPTION_KEY_CODE: u16 = 58;
-const OPTION_FLAG: u64 = 1 << 19;
+#[cfg(test)]
 const CONTROL_KEY_CODE: u16 = 59;
+#[cfg(test)]
 const CONTROL_FLAG: u64 = 1 << 18;
 const EVENT_SOURCE_USER_DATA: u32 = 42;
 pub const SYNTHETIC_EVENT_MARKER: i64 = 0x0056_4f49_4345;
@@ -93,7 +58,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CGEventCreateKeyboardEvent(source: *mut c_void, key: u16, down: bool) -> EventRef;
     fn CGEventSetFlags(event: EventRef, flags: u64);
-    fn CGEventKeyboardSetUnicodeString(event: EventRef, length: usize, text: *const u16);
     fn CGEventSetIntegerValueField(event: EventRef, field: u32, value: i64);
     fn CGEventPost(tap: u32, event: EventRef);
 }
@@ -241,56 +205,11 @@ fn collect_key_codes(entries: impl IntoIterator<Item = (char, u16)>) -> HashMap<
 }
 
 pub fn post_command(character: char) -> Result<()> {
-    post_shortcut(Key::Character(character), Modifiers::COMMAND)
-}
-
-pub fn post_enter() -> Result<()> {
-    post_shortcut(Key::Enter, Modifiers::NONE)
-}
-
-pub fn type_text(text: &str) -> Result<()> {
-    for character in text.chars() {
-        let mut encoded = [0; 2];
-        let encoded = character.encode_utf16(&mut encoded);
-        let down = KeyboardEvent::new((0, true, 0))?;
-        let up = KeyboardEvent::new((0, false, 0))?;
-        down.set_unicode(encoded);
-        up.set_unicode(encoded);
-        down.post();
-        up.post();
-    }
-    Ok(())
-}
-
-pub fn post_shortcut(key: Key, modifiers: Modifiers) -> Result<()> {
-    post_repeated_shortcut(key, modifiers, 1)
-}
-
-pub fn post_repeated_shortcut(key: Key, modifiers: Modifiers, count: u8) -> Result<()> {
-    if count == 0 {
-        return Ok(());
-    }
-    let key_code = match key {
-        Key::Character(character) => key_code_for(character)?,
-        Key::Home => 115,
-        Key::End => 119,
-        Key::Up => 126,
-        Key::Down => 125,
-        Key::Left => 123,
-        Key::Right => 124,
-        Key::Enter => 36,
-        Key::Escape => 53,
-    };
-    let modifiers = [
-        (Modifiers::COMMAND, COMMAND_FLAG, COMMAND_KEY_CODE),
-        (Modifiers::SHIFT, SHIFT_FLAG, SHIFT_KEY_CODE),
-        (Modifiers::OPTION, OPTION_FLAG, OPTION_KEY_CODE),
-        (Modifiers::CONTROL, CONTROL_FLAG, CONTROL_KEY_CODE),
-    ]
-    .into_iter()
-    .filter_map(|(modifier, flag, key)| modifiers.contains(modifier).then_some((flag, key)))
-    .collect::<Vec<_>>();
-    post_key_code(key_code, &modifiers, count)
+    post_key_code(
+        key_code_for(character)?,
+        &[(COMMAND_FLAG, COMMAND_KEY_CODE)],
+        1,
+    )
 }
 
 fn post_key_code(key_code: u16, modifiers: &[(u64, u16)], count: u8) -> Result<()> {
@@ -342,11 +261,6 @@ impl KeyboardEvent {
     fn post(&self) {
         // SAFETY: This value owns a valid CoreGraphics keyboard event.
         unsafe { CGEventPost(HID_EVENT_TAP, self.0) };
-    }
-
-    fn set_unicode(&self, text: &[u16]) {
-        // SAFETY: The event is valid and Quartz copies the provided UTF-16 buffer.
-        unsafe { CGEventKeyboardSetUnicodeString(self.0, text.len(), text.as_ptr()) };
     }
 }
 

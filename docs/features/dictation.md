@@ -16,14 +16,16 @@ were run for this rewrite.
 model are ready. Commands and OpenCode are not required. Settings > Dictation
 shortcut accepts modifier-only, modifier-plus-key, standalone Fn/Globe, and
 standalone function-key bindings. Capturing a replacement suspends global matching.
+Settings > Alternative shortcuts adds further bindings (persisted as
+`dictation_hotkey_alternatives`) that start the same dictation; the binding
+that was pressed owns the gesture until release, and alternatives may not
+overlap each other or the primary shortcut.
 
 **CLI:** `hex listen` uses saved settings; `--device` is authoritative. This is
 the CLI listener, not Settings. Do not run it beside an existing listener.
 
-**Separate targets:** [Voice Action](voice-action.md) has its own opt-in and
-capture target, with no double-tap lock. Host-owned API capture has its own
-ownership protocol.
-Neither proves the physical dictation shortcut; see the [feature index](README.md).
+**Separate targets:** Host-owned API capture has its own ownership protocol.
+It does not prove the physical dictation shortcut; see the [feature index](README.md).
 
 ## Sub-features
 
@@ -32,7 +34,8 @@ Neither proves the physical dictation shortcut; see the [feature index](README.m
 ```ts
 Ordinary hold                            // lock activation is mapped below
   ├── Hold -> Speak -> Release -> Finish          // dictate.hold
-  ├── Release before 300 ms -> Discard            // dictate.short-tap
+  ├── Press -> Start tone plays immediately       // dictate.start-tone
+  ├── Release before hold threshold -> Discard    // dictate.short-tap
   └── Early unrelated shortcut/click -> Discard   // not intentional dictation
 
 Ordinary shortcut -> No recording mute/pause or idle-sleep prevention
@@ -47,6 +50,10 @@ These cover constructed callback/reducer timing, not physical event delivery.
 
 The short-tap threshold belongs to ordinary hold activation. Voice-delimited
 and explicit programmatic capture have different intentional-start rules.
+The threshold is the persisted `dictation_hold_threshold_ms` setting (default
+300, applied through `dictation::set_minimum_hold_duration`); the start tone
+no longer waits for it and plays on the press itself. The double-tap lock
+window stays fixed at 300 ms.
 
 ### Lock, With Or Without Hold
 
@@ -271,9 +278,6 @@ TextEdit process were stopped afterward.
 - **Microphone modes:** verify onset and idle closure separately for Keep ready
   and Release when idle on an identified device. The macOS microphone indicator
   while Keep ready is idle is expected, not proof of recording.
-- **Voice Action is distinct:** its
-  [cold modifier-order gap](voice-action.md#cold-modifier-order) is not covered by
-  ordinary cold-dictation checks.
 - **Paste consumption:** current paste policy waits a fixed interval rather than
   acknowledging target consumption. Internal ordering does not establish
   correctness for an arbitrarily slow target application.

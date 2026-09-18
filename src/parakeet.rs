@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
@@ -14,18 +14,12 @@ use transcribe_cpp::{
 };
 
 use crate::context::ContextSnapshot;
-use crate::dictation::{DictationClip, DictationProtocol, pad_for_parakeet};
-use crate::dictation_processor::ProcessingObservation;
+use crate::dictation::{DictationClip, pad_for_parakeet};
 use crate::history::{History, HistoryDraft, HistoryKind};
-use crate::meeting::{self, TranscriptEntry, TranscriptPublication};
-use crate::paste::{PasteMode, Paster};
+use crate::paste::Paster;
 use crate::suppression::InputActivity;
-#[cfg(test)]
-use crate::text_replacements::ReplacementSet;
-use crate::transcription::{Transcriber, WarmTranscriber};
-use crate::transcription_models::{
-    TranscriptionModelId, TranscriptionSelection, model_path, validate,
-};
+use crate::transcription::WarmTranscriber;
+use crate::transcription_models::{TranscriptionSelection, model_path, validate};
 
 pub struct Parakeet {
     session: Session,
@@ -36,7 +30,6 @@ pub struct Parakeet {
 }
 
 static TRANSCRIBE_LOGGING: Once = Once::new();
-const TRANSCRIPTION_SAMPLES_PER_MS: usize = 16;
 const MAX_PENDING_OUTPUTS: usize = 16;
 
 pub enum WorkerEvent {
@@ -45,7 +38,6 @@ pub enum WorkerEvent {
         job_id: DictationJobId,
         target: TranscriptionTarget,
         result: Result<String, String>,
-        processing: Option<ProcessingObservation>,
     },
     Stage {
         job_id: DictationJobId,
@@ -72,20 +64,16 @@ impl DictationJobId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DictationJobStage {
     Transcribing,
-    Processing,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum PasteKind {
     LastTranscript,
-    MeetingDelta,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum TranscriptionTarget {
     Paste,
-    Send,
-    VoiceAction,
     Service,
 }
 
@@ -95,7 +83,6 @@ struct InferenceJob {
     submitted_at: Instant,
     clip: DictationClip,
     target: TranscriptionTarget,
-    protocol: Option<Arc<DictationProtocol>>,
     context: ContextSnapshot,
     selection: TranscriptionSelection,
 }
@@ -128,7 +115,6 @@ struct CompletedTranscript {
     audio_ms: u64,
     prepare_ms: u128,
     inference_ms: u128,
-    processing: Option<ProcessingObservation>,
 }
 
 enum OutputJob {
@@ -248,11 +234,7 @@ impl WorkerState {
 }
 
 impl DictationWorker {
-    pub fn start(
-        activity: InputActivity,
-        transformations: Arc<crate::personal_commands::TransformationClient>,
-        history: Option<History>,
-    ) -> Self {
+    pub fn start(activity: InputActivity, history: Option<History>) -> Self {
         const PROCESSOR_WORKERS: usize = 2;
         let (inference_jobs, inference_receiver) = mpsc::sync_channel::<InferenceCommand>(2);
         let (processor_jobs, processor_receiver) = mpsc::sync_channel::<ProcessorJob>(4);
@@ -269,7 +251,6 @@ impl DictationWorker {
         let output_worker = thread::spawn(move || {
             let mut paster = Paster::new(activity);
             let mut last_transcript = None;
-            let mut meeting_cursor = MeetingPasteCursor::default();
             let mut ordered = OrderedOutputs::default();
             while let Ok(job) = output_receiver.recv() {
                 if matches!(job, OutputJob::PreparePaste) {
@@ -279,9 +260,8 @@ impl DictationWorker {
                 for job in ordered.push(job) {
                     let event = finish_output(
                         job,
-                        &mut |text, mode, commit| paster.paste(text, mode, commit),
+                        &mut |text, commit| paster.paste(text, commit),
                         &mut last_transcript,
-                        &mut meeting_cursor,
                         history.as_ref(),
                     );
                     let mut state = output_state
@@ -310,8 +290,6 @@ impl DictationWorker {
         for _ in 0..PROCESSOR_WORKERS {
             let processor_receiver = processor_receiver.clone();
             let processor_output = output_jobs.clone();
-            let processor_events = event_sender.clone();
-            let transformations = transformations.clone();
             processor_workers.push(thread::spawn(move || {
                 loop {
                     let job = {
@@ -325,81 +303,10 @@ impl DictationWorker {
                         let _ = processor_output.send(OutputJob::Cancelled { job_id: job.job_id });
                         continue;
                     }
-                    let profiles = crate::config::dictation_profiles();
-                    if matches!(job.target, TranscriptionTarget::VoiceAction)
-                        || profiles.processes(&job.context)
-                    {
-                        let _ = processor_events.send(WorkerEvent::Stage {
-                            job_id: job.job_id,
-                            stage: DictationJobStage::Processing,
-                        });
-                    }
-                    let mut processed = if matches!(job.target, TranscriptionTarget::VoiceAction) {
-                        profiles.process_voice_action_cancellable(
-                            &job.text,
-                            job.context.selected_text.as_deref(),
-                            &job.context,
-                            &job.control.cancelled,
-                        )
-                    } else {
-                        profiles.process_cancellable(
-                            &job.text,
-                            &job.context,
-                            &job.control.cancelled,
-                        )
-                    };
-                    if !processed.transformations.is_empty() && !job.control.is_cancelled() {
-                        let started = Instant::now();
-                        match transformations.transform(
-                            &processed.transformations,
-                            &processed.text,
-                            &job.context,
-                            &job.control.cancelled,
-                        ) {
-                            Ok(text) => {
-                                processed.text = text;
-                                let observation = processed.observation.get_or_insert_with(|| {
-                                    ProcessingObservation {
-                                        profile: "Custom transformations".into(),
-                                        latency_ms: 0,
-                                        fallback: None,
-                                    }
-                                });
-                                observation.latency_ms = observation
-                                    .latency_ms
-                                    .saturating_add(started.elapsed().as_millis() as u64);
-                            }
-                            Err(error) => {
-                                let observation = processed.observation.get_or_insert_with(|| {
-                                    ProcessingObservation {
-                                        profile: "Custom transformations".into(),
-                                        latency_ms: 0,
-                                        fallback: None,
-                                    }
-                                });
-                                observation.latency_ms = observation
-                                    .latency_ms
-                                    .saturating_add(started.elapsed().as_millis() as u64);
-                                observation.fallback = Some(error);
-                            }
-                        }
-                    }
+                    let text = crate::config::dictation_profiles().process(&job.text, &job.context);
                     if job.control.is_cancelled() {
                         let _ = processor_output.send(OutputJob::Cancelled { job_id: job.job_id });
                         continue;
-                    }
-                    if let Some(observation) = &processed.observation
-                        && let Some(error) = &observation.fallback
-                    {
-                        if matches!(job.target, TranscriptionTarget::VoiceAction) {
-                            tracing::warn!(%error, "voice action processing failed");
-                        } else {
-                            tracing::warn!(
-                                profile = observation.profile,
-                                %error,
-                                "dictation processing fell back to the previous pipeline output"
-                            );
-                        }
                     }
                     if processor_output
                         .send(OutputJob::Completed {
@@ -407,7 +314,7 @@ impl DictationWorker {
                             control: job.control,
                             target: job.target,
                             result: Box::new(Ok(CompletedTranscript {
-                                text: processed.text,
+                                text,
                                 raw: job.text,
                                 application: job.context.application,
                                 total_started: job.total_started,
@@ -415,7 +322,6 @@ impl DictationWorker {
                                 audio_ms: job.audio_ms,
                                 prepare_ms: job.prepare_ms,
                                 inference_ms: job.inference_ms,
-                                processing: processed.observation,
                             })),
                         })
                         .is_err()
@@ -480,26 +386,22 @@ impl DictationWorker {
                 let samples = transcriber.prepare_samples(clip_samples);
                 let prepare_ms = prepare_started.elapsed().as_millis();
                 let inference_started = Instant::now();
-                let result = match (transcriber, job.protocol.as_deref()) {
-                    (Transcriber::Gguf(model), Some(protocol)) => {
-                        model.transcribe_voice(&samples, protocol)
-                    }
-                    (transcriber, _) => transcriber.transcribe(&samples),
-                }
-                .map(|text| {
-                    let corrected = if matches!(job.target, TranscriptionTarget::Service) {
-                        text.clone()
-                    } else {
-                        prepare_transcript(&text, job.protocol.as_deref())
-                    };
-                    tracing::debug!(
-                        raw_transcript = text,
-                        corrected_transcript = corrected,
-                        "prepared local transcript"
-                    );
-                    corrected
-                })
-                .map_err(|error| error.to_string());
+                let result = transcriber
+                    .transcribe(&samples)
+                    .map(|text| {
+                        let corrected = if matches!(job.target, TranscriptionTarget::Service) {
+                            text.clone()
+                        } else {
+                            text.trim().to_string()
+                        };
+                        tracing::debug!(
+                            raw_transcript = text,
+                            corrected_transcript = corrected,
+                            "prepared local transcript"
+                        );
+                        corrected
+                    })
+                    .map_err(|error| error.to_string());
                 let inference_ms = inference_started.elapsed().as_millis();
                 if job.control.is_cancelled() {
                     let _ = inference_output.send(OutputJob::Cancelled { job_id: job.job_id });
@@ -507,12 +409,8 @@ impl DictationWorker {
                 }
                 match result {
                     Ok(text)
-                        if matches!(
-                            job.target,
-                            TranscriptionTarget::Paste
-                                | TranscriptionTarget::Send
-                                | TranscriptionTarget::VoiceAction
-                        ) && !text.trim().is_empty() =>
+                        if matches!(job.target, TranscriptionTarget::Paste)
+                            && !text.trim().is_empty() =>
                     {
                         if processor_jobs
                             .send(ProcessorJob {
@@ -543,7 +441,6 @@ impl DictationWorker {
                             audio_ms,
                             prepare_ms,
                             inference_ms,
-                            processing: None,
                         });
                         if inference_output
                             .send(OutputJob::Completed {
@@ -576,7 +473,6 @@ impl DictationWorker {
         &self,
         clip: DictationClip,
         target: TranscriptionTarget,
-        protocol: Option<Arc<DictationProtocol>>,
         context: ContextSnapshot,
     ) -> Result<DictationJobId, &'static str> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -592,7 +488,6 @@ impl DictationWorker {
                 submitted_at: Instant::now(),
                 clip,
                 target,
-                protocol,
                 context,
                 selection,
             })))
@@ -626,10 +521,6 @@ impl DictationWorker {
 
     pub fn paste_last(&self) -> Result<(), &'static str> {
         self.submit_paste(PasteKind::LastTranscript)
-    }
-
-    pub fn paste_meeting(&self) -> Result<(), &'static str> {
-        self.submit_paste(PasteKind::MeetingDelta)
     }
 
     fn submit_paste(&self, kind: PasteKind) -> Result<(), &'static str> {
@@ -727,9 +618,8 @@ fn queue_error(error: TrySendError<impl Sized>) -> &'static str {
 
 fn finish_output(
     job: OutputJob,
-    paste: &mut impl FnMut(&str, PasteMode, &dyn Fn() -> bool) -> Result<()>,
+    paste: &mut impl FnMut(&str, &dyn Fn() -> bool) -> Result<()>,
     last_transcript: &mut Option<String>,
-    meeting_cursor: &mut MeetingPasteCursor,
     history: Option<&History>,
 ) -> WorkerEvent {
     match job {
@@ -740,45 +630,21 @@ fn finish_output(
             target,
             result,
         } if !control.is_cancelled() => {
-            let result = *result;
-            let processing = result
-                .as_ref()
-                .ok()
-                .and_then(|result| result.processing.clone());
             let result = result.and_then(|completed| {
-                if matches!(target, TranscriptionTarget::VoiceAction)
-                    && let Some(error) = completed
-                        .processing
-                        .as_ref()
-                        .and_then(|processing| processing.fallback.clone())
-                {
-                    return Err(error);
-                }
                 if control.is_cancelled() {
-                    return Err("voice action was cancelled".into());
+                    return Err("dictation was cancelled".into());
                 }
                 let paste_started = Instant::now();
                 if !completed.text.trim().is_empty() {
                     let commit = || control.begin_output();
                     match target {
-                        TranscriptionTarget::Paste => {
-                            paste(&completed.text, PasteMode::Continue, &commit)
-                        }
-                        TranscriptionTarget::Send => {
-                            paste(&completed.text, PasteMode::Send, &commit)
-                        }
-                        TranscriptionTarget::VoiceAction => {
-                            paste(&completed.text, PasteMode::Standalone, &commit)
-                        }
+                        TranscriptionTarget::Paste => paste(&completed.text, &commit),
                         TranscriptionTarget::Service => commit()
                             .then_some(())
                             .ok_or_else(|| eyre!("dictation was cancelled")),
                     }
                     .map_err(|error| error.to_string())?;
-                    if matches!(
-                        target,
-                        TranscriptionTarget::Paste | TranscriptionTarget::Send
-                    ) {
+                    if matches!(target, TranscriptionTarget::Paste) {
                         *last_transcript = Some(completed.text.clone());
                     }
                     if let Some(history) = history {
@@ -803,7 +669,6 @@ fn finish_output(
                     job_id,
                     target,
                     result,
-                    processing,
                 }
             }
         }
@@ -816,13 +681,9 @@ fn finish_output(
                     .as_deref()
                     .ok_or_else(|| "no previous transcript is available".to_string())
                     .and_then(|text| {
-                        paste(text, PasteMode::Continue, &|| true)
-                            .map_err(|error| error.to_string())?;
+                        paste(text, &|| true).map_err(|error| error.to_string())?;
                         Ok(text.to_string())
                     }),
-                PasteKind::MeetingDelta => {
-                    paste_meeting_delta(paste, meeting_cursor).map_err(|error| error.to_string())
-                }
             };
             WorkerEvent::Pasted { kind, result }
         }
@@ -834,8 +695,6 @@ fn finish_output(
 fn record_history(history: &History, target: TranscriptionTarget, completed: &CompletedTranscript) {
     let kind = match target {
         TranscriptionTarget::Paste => HistoryKind::Dictation,
-        TranscriptionTarget::Send => HistoryKind::Send,
-        TranscriptionTarget::VoiceAction => HistoryKind::VoiceAction,
         TranscriptionTarget::Service => return,
     };
     let draft = HistoryDraft {
@@ -843,13 +702,7 @@ fn record_history(history: &History, target: TranscriptionTarget, completed: &Co
         raw_text: completed.raw.clone(),
         final_text: completed.text.clone(),
         application: completed.application.clone(),
-        processing: completed.processing.as_ref().map(|processing| {
-            crate::history::HistoryProcessing {
-                profile: processing.profile.clone(),
-                latency_ms: processing.latency_ms,
-                fallback: processing.fallback.clone(),
-            }
-        }),
+        processing: None,
         audio_ms: completed.audio_ms,
         inference_ms: completed.inference_ms as u64,
         total_ms: completed.total_started.elapsed().as_millis() as u64,
@@ -857,78 +710,6 @@ fn record_history(history: &History, target: TranscriptionTarget, completed: &Co
     if let Err(error) = history.record(draft) {
         tracing::warn!(%error, "could not record dictation history");
     }
-}
-
-fn prepare_transcript(text: &str, protocol: Option<&DictationProtocol>) -> String {
-    strip_transcript_protocol(text, protocol)
-}
-
-#[cfg(test)]
-fn prepare_transcript_with(
-    text: &str,
-    protocol: Option<&DictationProtocol>,
-    replacements: &ReplacementSet,
-) -> String {
-    replacements.replace(&strip_transcript_protocol(text, protocol))
-}
-
-fn strip_transcript_protocol(text: &str, protocol: Option<&DictationProtocol>) -> String {
-    protocol.map_or_else(|| text.trim().to_string(), |protocol| protocol.strip(text))
-}
-
-#[derive(Default)]
-struct MeetingPasteCursor {
-    meeting_id: Option<String>,
-    publication: Option<TranscriptPublication>,
-    seen: HashSet<TranscriptEntry>,
-}
-
-fn paste_meeting_delta(
-    paste: &mut impl FnMut(&str, PasteMode, &dyn Fn() -> bool) -> Result<()>,
-    cursor: &mut MeetingPasteCursor,
-) -> Result<String> {
-    let meetings = meeting::list()?;
-    let selected = meeting::active_or_latest(&meetings)
-        .ok_or_else(|| eyre!("no meeting transcript is available"))?;
-    // Live and final ASR use different segment boundaries, so switching a
-    // cursor between them could repeat or skip an overlapping segment.
-    let same_meeting = cursor.meeting_id.as_deref() == Some(&selected.id);
-    let empty = HashSet::new();
-    let (publication, seen) = if same_meeting {
-        (cursor.publication, &cursor.seen)
-    } else {
-        (None, &empty)
-    };
-    let transcript = meeting::completed_transcript(&selected.id, publication)?;
-    let (text, pasted_entries) = prepare_meeting_delta(&transcript.entries, seen)?;
-    paste(&text, PasteMode::Standalone, &|| true)?;
-    if !same_meeting {
-        cursor.seen.clear();
-    }
-    cursor.meeting_id = Some(selected.id.clone());
-    cursor.publication = Some(transcript.publication);
-    cursor.seen.extend(pasted_entries);
-    Ok(text)
-}
-
-fn prepare_meeting_delta(
-    entries: &[TranscriptEntry],
-    seen: &HashSet<TranscriptEntry>,
-) -> Result<(String, Vec<TranscriptEntry>)> {
-    let new_entries = entries
-        .iter()
-        .filter(|entry| !seen.contains(*entry))
-        .cloned()
-        .collect::<Vec<_>>();
-    if new_entries.is_empty() {
-        return Err(eyre!("no new completed meeting transcript is available"));
-    }
-    let text = meeting::coalesce_transcript(new_entries.iter().cloned())
-        .into_iter()
-        .map(|entry| format!("{}: {}", entry.source.label(), entry.text))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    Ok((text, new_entries))
 }
 
 pub(crate) fn default_model_path() -> Result<std::path::PathBuf> {
@@ -1107,10 +888,6 @@ impl Parakeet {
         self.selection.as_ref() == Some(selection)
     }
 
-    pub(crate) fn model_id(&self) -> Option<TranscriptionModelId> {
-        self.selection.as_ref().map(|selection| selection.model)
-    }
-
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
         let Some(max_audio_samples) = self.max_audio_samples else {
             return self.transcribe_segments(samples).map(|result| result.text);
@@ -1131,40 +908,6 @@ impl Parakeet {
         Ok(text.join(" "))
     }
 
-    pub fn transcribe_voice(
-        &mut self,
-        samples: &[f32],
-        protocol: &DictationProtocol,
-    ) -> Result<String> {
-        if self
-            .max_audio_samples
-            .is_some_and(|maximum| samples.len() > maximum)
-        {
-            return self.transcribe(samples);
-        }
-        let transcript = self.transcribe_segments(samples)?;
-        let words = transcript
-            .words
-            .iter()
-            .map(|word| word.text.clone())
-            .collect::<Vec<_>>();
-        let Some(control_words) = protocol.control_suffix_word_count(&words) else {
-            return Ok(transcript.text);
-        };
-        let control = &transcript.words[transcript.words.len() - control_words];
-        let cut = (control.t0_ms.max(0) as usize * TRANSCRIPTION_SAMPLES_PER_MS).min(samples.len());
-        if cut == 0 || cut == samples.len() {
-            return Ok(transcript.text);
-        }
-        let mut content = samples[..cut].to_vec();
-        pad_for_parakeet(&mut content);
-        tracing::debug!(
-            control_start_ms = control.t0_ms,
-            "retranscribing voice dictation without control audio"
-        );
-        self.transcribe(&content)
-    }
-
     pub fn transcribe_segments(&mut self, samples: &[f32]) -> Result<Transcript> {
         self.session
             .run(samples, &self.options)
@@ -1180,142 +923,7 @@ mod tests {
 
     use super::*;
 
-    use crate::app_settings::TextReplacement;
     use crate::dictation::resample_for_parakeet;
-    use crate::meeting::MeetingSource;
-
-    #[test]
-    #[ignore = "requires HEX_COHERE_MODEL and HEX_COHERE_FIXTURES synthetic audio"]
-    fn cohere_long_form_keeps_all_sections_with_and_without_pauses() {
-        let model_path = PathBuf::from(std::env::var_os("HEX_COHERE_MODEL").expect("model path"));
-        let fixtures =
-            PathBuf::from(std::env::var_os("HEX_COHERE_FIXTURES").expect("fixture path"));
-        let selection = TranscriptionSelection {
-            model: TranscriptionModelId::CohereTranscribe,
-            language: "en".into(),
-            recognition_hints: String::new(),
-        };
-        let mut model = Parakeet::load_from(&model_path, false, Some(&selection)).unwrap();
-        eprintln!(
-            "Cohere maximum chunk: {:?} samples",
-            model.max_audio_samples
-        );
-        for (name, repeats) in [
-            ("long-continuous", 1),
-            ("long-pauses", 1),
-            ("long-repeated", 3),
-        ] {
-            let mut reader = WavReader::open(fixtures.join(format!("{name}.wav"))).unwrap();
-            assert_eq!(reader.spec().sample_rate, 16_000);
-            assert_eq!(reader.spec().channels, 1);
-            let samples = reader
-                .samples::<i16>()
-                .map(|sample| f32::from(sample.unwrap()) / 32768.0)
-                .collect::<Vec<_>>();
-            assert!(samples.len() > 35 * 16_000);
-            let text = model.transcribe(&samples).unwrap().to_lowercase();
-            for phrase in [
-                "small community garden",
-                "bright green door",
-                "purple submarine",
-            ] {
-                assert_eq!(
-                    text.matches(phrase).count(),
-                    repeats,
-                    "{name} lost {phrase:?}: {text}"
-                );
-            }
-            assert!(
-                text.split_whitespace().count() >= 160 * repeats,
-                "{name}: {text}"
-            );
-        }
-    }
-
-    #[test]
-    fn replacements_follow_control_stripping_and_stay_corrected_through_fallback() {
-        let replacements = ReplacementSet::new(&[
-            TextReplacement {
-                matched_phrase: "open code".into(),
-                output: "OpenCode".into(),
-            },
-            TextReplacement {
-                matched_phrase: "alpha".into(),
-                output: "beta".into(),
-            },
-            TextReplacement {
-                matched_phrase: "beta".into(),
-                output: "gamma".into(),
-            },
-        ]);
-
-        let protocol = DictationProtocol::default();
-        let corrected = prepare_transcript_with(
-            "Dictate start, use open code and alpha. Dictate stop.",
-            Some(&protocol),
-            &replacements,
-        );
-
-        assert_eq!(corrected, "Use OpenCode and beta.");
-        assert_eq!(
-            prepare_transcript_with("Dictate start, alpha. Dictate stop.", None, &replacements),
-            "Dictate start, beta. Dictate stop."
-        );
-        let custom_protocol = DictationProtocol::try_new(
-            vec!["begin note".into()],
-            vec!["finish note".into()],
-            vec!["send note".into()],
-            vec!["discard note".into()],
-        )
-        .unwrap();
-        assert_eq!(
-            prepare_transcript_with(
-                "Begin note, alpha. Finish note.",
-                Some(&custom_protocol),
-                &replacements,
-            ),
-            "beta."
-        );
-        assert_eq!(replacements.replace("beta"), "gamma");
-        assert_eq!(replacements.replace("Use OPEN CODE."), "Use OpenCode.");
-    }
-
-    #[test]
-    fn meeting_delta_tracks_each_source_and_coalesces_turns() {
-        let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
-            source,
-            start_ms,
-            end_ms,
-            text: text.into(),
-        };
-        let entries = [
-            entry(MeetingSource::Microphone, 0, 1_000, "First."),
-            entry(MeetingSource::System, 500, 2_500, "Reply."),
-            entry(MeetingSource::Microphone, 1_100, 2_000, "Second."),
-        ];
-
-        let mut seen = HashSet::new();
-        let (text, pasted) = prepare_meeting_delta(&entries, &seen).unwrap();
-        assert_eq!(text, "You: First.\n\nComputer: Reply.\n\nYou: Second.");
-        seen.extend(pasted);
-        assert!(prepare_meeting_delta(&entries, &seen).is_err());
-
-        let appended = [
-            entries[0].clone(),
-            entries[1].clone(),
-            entry(MeetingSource::System, 900, 1_050, "Late completion."),
-            entries[2].clone(),
-            entry(MeetingSource::Microphone, 2_600, 3_000, "Third."),
-            entry(MeetingSource::System, 2_800, 3_200, "Follow-up."),
-        ];
-        let (text, pasted) = prepare_meeting_delta(&appended, &seen).unwrap();
-        assert_eq!(
-            text,
-            "Computer: Late completion.\n\nYou: Third.\n\nComputer: Follow-up."
-        );
-        seen.extend(pasted);
-        assert!(prepare_meeting_delta(&appended, &seen).is_err());
-    }
 
     #[test]
     fn parallel_processing_results_are_released_in_submission_order() {
@@ -1367,7 +975,6 @@ mod tests {
             assert!(ordered.push(output_receiver.try_recv().unwrap()).is_empty());
         }
         assert_eq!(worker.paste_last(), Err("dictation queue is full"));
-        assert_eq!(worker.paste_meeting(), Err("dictation queue is full"));
         assert_eq!(ordered.waiting.len(), MAX_PENDING_OUTPUTS - 1);
         assert_eq!(
             worker.state.lock().unwrap().next_sequence,
@@ -1431,7 +1038,7 @@ mod tests {
 
     #[test]
     fn output_stays_cancellable_through_preparation_but_not_after_mutation() {
-        use std::cell::{Cell, RefCell};
+        use std::cell::RefCell;
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         use crate::history::{HistoryRetention, HistoryStore};
@@ -1446,134 +1053,101 @@ mod tests {
             audio_ms: 1_000,
             prepare_ms: 0,
             inference_ms: 0,
-            processing: None,
         };
-        for target in [
-            TranscriptionTarget::Paste,
-            TranscriptionTarget::Send,
-            TranscriptionTarget::VoiceAction,
-        ] {
-            for cancel_during_preparation in [true, false] {
-                let path = std::env::temp_dir().join(format!(
-                    "hex-output-cancellation-{}-{}.json",
-                    std::process::id(),
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                ));
-                let history = History::new(HistoryStore::open(
-                    path.clone(),
-                    HistoryRetention::Forever,
-                    crate::history::now_ms(),
-                ));
-                record_history(&history, TranscriptionTarget::Paste, &completed("previous"));
-                let saved_history = std::fs::read(&path).unwrap();
-                let mut last_transcript = Some("previous".into());
-                let clipboard = RefCell::new("original clipboard".to_string());
-                let pasted = RefCell::new(Vec::new());
-                let sent = Cell::new(false);
-                let control = Arc::new(JobControl::default());
-                let (blocked, blocking) = mpsc::channel();
-                let (resume, resumed) = mpsc::channel();
-                let cancelling = control.clone();
-                let cancellation = thread::spawn(move || {
-                    blocking.recv_timeout(Duration::from_secs(5)).unwrap();
-                    let accepted = cancelling.cancel();
-                    resume.send(()).unwrap();
-                    accepted
-                });
-                let pause = || {
-                    blocked.send(()).unwrap();
-                    resumed.recv_timeout(Duration::from_secs(5)).unwrap();
-                };
-                let event = finish_output(
-                    OutputJob::Completed {
-                        job_id: DictationJobId(0),
-                        control: control.clone(),
-                        target,
-                        result: Box::new(Ok(completed("new output"))),
-                    },
-                    &mut |text, mode, commit| {
-                        assert!(matches!(
-                            (target, mode),
-                            (TranscriptionTarget::Paste, PasteMode::Continue)
-                                | (TranscriptionTarget::Send, PasteMode::Send)
-                                | (TranscriptionTarget::VoiceAction, PasteMode::Standalone)
-                        ));
-                        commit_prepared_paste(
-                            || {
-                                // Model a blocked restore lock or lazy clipboard provider.
-                                if cancel_during_preparation {
-                                    pause();
-                                }
-                                Ok(clipboard.borrow().clone())
-                            },
-                            commit,
-                            |_previous| {
-                                *clipboard.borrow_mut() = text.into();
-                                if !cancel_during_preparation {
-                                    pause();
-                                }
-                                pasted.borrow_mut().push(text.to_string());
-                                Ok(())
-                            },
-                        )?;
-                        if matches!(mode, PasteMode::Send) {
-                            sent.set(true);
-                        }
-                        Ok(())
-                    },
-                    &mut last_transcript,
-                    &mut MeetingPasteCursor::default(),
-                    Some(&history),
-                );
+        for cancel_during_preparation in [true, false] {
+            let path = std::env::temp_dir().join(format!(
+                "hex-output-cancellation-{}-{}.json",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let history = History::new(HistoryStore::open(
+                path.clone(),
+                HistoryRetention::Forever,
+                crate::history::now_ms(),
+            ));
+            record_history(&history, TranscriptionTarget::Paste, &completed("previous"));
+            let saved_history = std::fs::read(&path).unwrap();
+            let mut last_transcript = Some("previous".into());
+            let clipboard = RefCell::new("original clipboard".to_string());
+            let pasted = RefCell::new(Vec::new());
+            let control = Arc::new(JobControl::default());
+            let (blocked, blocking) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let cancelling = control.clone();
+            let cancellation = thread::spawn(move || {
+                blocking.recv_timeout(Duration::from_secs(5)).unwrap();
+                let accepted = cancelling.cancel();
+                resume.send(()).unwrap();
+                accepted
+            });
+            let pause = || {
+                blocked.send(()).unwrap();
+                resumed.recv_timeout(Duration::from_secs(5)).unwrap();
+            };
+            let event = finish_output(
+                OutputJob::Completed {
+                    job_id: DictationJobId(0),
+                    control: control.clone(),
+                    target: TranscriptionTarget::Paste,
+                    result: Box::new(Ok(completed("new output"))),
+                },
+                &mut |text, commit| {
+                    commit_prepared_paste(
+                        || {
+                            // Model a blocked restore lock or lazy clipboard provider.
+                            if cancel_during_preparation {
+                                pause();
+                            }
+                            Ok(clipboard.borrow().clone())
+                        },
+                        commit,
+                        |_previous| {
+                            *clipboard.borrow_mut() = text.into();
+                            if !cancel_during_preparation {
+                                pause();
+                            }
+                            pasted.borrow_mut().push(text.to_string());
+                            Ok(())
+                        },
+                    )?;
+                    Ok(())
+                },
+                &mut last_transcript,
+                Some(&history),
+            );
 
-                assert_eq!(cancellation.join().unwrap(), cancel_during_preparation);
-                assert_eq!(control.is_cancelled(), cancel_during_preparation);
-                if cancel_during_preparation {
-                    assert!(matches!(
-                        event,
-                        WorkerEvent::Cancelled {
-                            job_id: DictationJobId(0)
-                        }
-                    ));
-                    assert_eq!(*clipboard.borrow(), "original clipboard");
-                    assert!(pasted.borrow().is_empty());
-                    assert!(!sent.get());
-                    assert_eq!(last_transcript.as_deref(), Some("previous"));
-                    assert_eq!(history.search("").len(), 1);
-                    assert_eq!(std::fs::read(&path).unwrap(), saved_history);
-                } else {
-                    assert!(matches!(
-                        event,
-                        WorkerEvent::Completed { result: Ok(ref text), .. } if text == "new output"
-                    ));
-                    assert_eq!(*clipboard.borrow(), "new output");
-                    assert_eq!(*pasted.borrow(), ["new output"]);
-                    assert_eq!(sent.get(), matches!(target, TranscriptionTarget::Send));
-                    let expected_last = if matches!(target, TranscriptionTarget::VoiceAction) {
-                        "previous"
-                    } else {
-                        "new output"
-                    };
-                    assert_eq!(last_transcript.as_deref(), Some(expected_last));
-                    let entries = history.search("");
-                    assert_eq!(entries.len(), 2);
-                    assert_eq!(entries[0].final_text, "new output");
-                    assert_eq!(
-                        entries[0].kind,
-                        match target {
-                            TranscriptionTarget::Paste => HistoryKind::Dictation,
-                            TranscriptionTarget::Send => HistoryKind::Send,
-                            TranscriptionTarget::VoiceAction => HistoryKind::VoiceAction,
-                            TranscriptionTarget::Service => unreachable!(),
-                        }
-                    );
-                }
-                drop(history);
-                std::fs::remove_file(path).unwrap();
+            assert_eq!(cancellation.join().unwrap(), cancel_during_preparation);
+            assert_eq!(control.is_cancelled(), cancel_during_preparation);
+            if cancel_during_preparation {
+                assert!(matches!(
+                    event,
+                    WorkerEvent::Cancelled {
+                        job_id: DictationJobId(0)
+                    }
+                ));
+                assert_eq!(*clipboard.borrow(), "original clipboard");
+                assert!(pasted.borrow().is_empty());
+                assert_eq!(last_transcript.as_deref(), Some("previous"));
+                assert_eq!(history.search("").len(), 1);
+                assert_eq!(std::fs::read(&path).unwrap(), saved_history);
+            } else {
+                assert!(matches!(
+                    event,
+                    WorkerEvent::Completed { result: Ok(ref text), .. } if text == "new output"
+                ));
+                assert_eq!(*clipboard.borrow(), "new output");
+                assert_eq!(*pasted.borrow(), ["new output"]);
+                assert_eq!(last_transcript.as_deref(), Some("new output"));
+                let entries = history.search("");
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].final_text, "new output");
+                assert_eq!(entries[0].kind, HistoryKind::Dictation);
             }
+            drop(history);
+            std::fs::remove_file(path).unwrap();
         }
     }
 
@@ -1593,52 +1167,6 @@ mod tests {
         assert_eq!(state.cancel_latest(), Some(DictationJobId(1)));
         assert_eq!(state.cancel_latest(), Some(DictationJobId(0)));
         assert_eq!(state.cancel_latest(), None);
-    }
-
-    #[test]
-    #[ignore = "requires VOICE_CONTROL_DICTATION_FIXTURE_DIR and the installed Parakeet model"]
-    fn dictation_protocol_audio() {
-        let directory =
-            PathBuf::from(std::env::var("VOICE_CONTROL_DICTATION_FIXTURE_DIR").unwrap());
-        let protocol = DictationProtocol::try_new(
-            vec!["say".into()],
-            vec!["say paste".into(), "say stop".into()],
-            vec!["say send".into()],
-            vec!["say cancel".into(), "never mind".into()],
-        )
-        .unwrap();
-        let mut model = Parakeet::load().unwrap();
-        model.options.timestamps = TimestampKind::Word;
-
-        for (name, expected) in [
-            ("period-stop", "I don't understand this."),
-            ("question-stop", "Is this working?"),
-            ("exclamation-send", "Ship it."),
-            ("comma-stop", "Meet me at five."),
-        ] {
-            let mut reader = WavReader::open(directory.join(format!("{name}.wav"))).unwrap();
-            assert_eq!(reader.spec().sample_rate, 16_000);
-            let samples = reader
-                .samples::<f32>()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-            let transcript = model.transcribe_segments(&samples).unwrap();
-            println!("{name}: {:?}", transcript.text);
-            for word in &transcript.words {
-                println!("  {}..{} {:?}", word.t0_ms, word.t1_ms, word.text);
-            }
-            assert_ne!(transcript.timestamp_kind, TimestampKind::None);
-            assert!(
-                protocol.control_suffix(&transcript.text).is_some(),
-                "{name} did not contain a configured control: {:?}",
-                transcript.text
-            );
-
-            let clipped = model.transcribe_voice(&samples, &protocol).unwrap();
-            let prepared = prepare_transcript(&clipped, Some(&protocol));
-            println!("  clipped: {:?} -> {:?}", clipped, prepared);
-            assert_eq!(prepared, expected);
-        }
     }
 
     #[test]

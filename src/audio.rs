@@ -10,8 +10,6 @@ use cpal::{Device, SampleFormat, Stream, StreamConfig};
 
 #[cfg(target_os = "macos")]
 const AUTOMATIC_INPUT_DEVICE_PREFERENCES: &[&str] = crate::config::INPUT_DEVICES;
-#[cfg(target_os = "linux")]
-const AUTOMATIC_INPUT_DEVICE_PREFERENCES: &[&str] = &[];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CaptureInstant(u64);
@@ -243,22 +241,6 @@ impl AudioInput {
             .wrap_err("could not enumerate input devices")?
             .find(|device| device.to_string() == name)
             .ok_or_else(|| eyre!("microphone is unavailable: {name}"))?;
-        Self::open_device(device)
-    }
-
-    #[cfg(target_os = "linux")]
-    pub fn open_matching(query: &str) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .input_devices()
-            .wrap_err("could not enumerate input devices")?
-            .find(|device| {
-                device
-                    .to_string()
-                    .to_lowercase()
-                    .contains(&query.to_lowercase())
-            })
-            .ok_or_else(|| eyre!("microphone is unavailable: {query}"))?;
         Self::open_device(device)
     }
 

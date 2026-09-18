@@ -1,15 +1,14 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, PathPromptOptions, Pixels, Point, Render, ScrollHandle, SharedString,
+    AnyElement, App, Bounds, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight,
+    IntoElement, KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, Render, SharedString,
     Subscription, Timer, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
     actions, deferred, div, img, prelude::*, px, relative, rgb, rgba, size,
 };
@@ -19,7 +18,6 @@ use crate::app_settings::{
     RecordingAudioBehavior, TextReplacement,
 };
 use crate::application_catalog::InstalledApplication;
-use crate::commands::{CommandConfig, CommandInfo, CommandScope};
 use crate::desktop_activity::DesktopActivity;
 use crate::desktop_host::{
     DesktopAction, DesktopCapabilities, DesktopHost, DesktopSnapshot, DesktopTranscriptionSnapshot,
@@ -32,29 +30,24 @@ use crate::desktop_transcription_picker::{
     transcription_selection_is_active,
 };
 use crate::desktop_ui::{
-    ACCENT, CANVAS, COMPACT_MULTILINE_INPUT_HEIGHT, CONTROL_HEIGHT, FAINT, LINE, MUTED, NEGATIVE,
-    NavigationIcon, PANE_CONTENT_WIDTH, PANE_LIST_WIDTH, SECTION_GAP, SIDEBAR_WIDTH, SURFACE,
-    SURFACE_HOVER, SURFACE_SELECTED, TEXT, TEXT_INPUT_HEIGHT, TEXT_SOFT, compact_button,
-    compact_header_plus_button, compact_panel, compact_panel_header, compact_plus_button,
-    compact_section_label, disclosure_button, empty_message, error_message, header_button,
-    hotkey_keycaps, listener_status, mix_color, navigation_item, pane_body, pane_content,
-    pane_header, pane_header_with_action, section_label, segmented_control, segmented_item,
-    settings_copy, settings_panel, settings_row, settings_section_label, sidebar_frame, toggle,
-    window_frame,
+    ACCENT, CANVAS, CONTROL_HEIGHT, FAINT, LINE, MUTED, NEGATIVE, NavigationIcon,
+    PANE_CONTENT_WIDTH, PANE_LIST_WIDTH, SECTION_GAP, SIDEBAR_WIDTH, SURFACE, SURFACE_HOVER,
+    SURFACE_SELECTED, TEXT, TEXT_SOFT, compact_button, compact_header_plus_button, compact_panel,
+    compact_panel_header, compact_plus_button, compact_section_label, disclosure_button,
+    empty_message, error_message, header_button, hotkey_keycaps, listener_status, mix_color,
+    navigation_item, pane_body, pane_content, pane_header, pane_header_with_action, section_label,
+    segmented_control, segmented_item, settings_copy, settings_panel, settings_row,
+    settings_section_label, sidebar_frame, toggle, window_frame,
 };
 use crate::dictation_indicator::{DictationIndicatorEvent, DictationIndicatorSender, HudTuning};
-use crate::dictation_processor::{ModelCatalog, ModelChoice};
 use crate::events::{
     CommandOutcome, DictationPhase, EventReader, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
 };
 use crate::history::{History, HistoryEntry, HistoryKind, HistoryRetention};
 use crate::login_item::LoginItemStatus;
-use crate::meeting::{self, MeetingManifest, MeetingRequest, MeetingStatus};
 use crate::onboarding::{
     PermissionAction, PermissionKind, PermissionState, PermissionWarning, SetupStatus,
 };
-use crate::personal_commands::{HostState, StatusContext, StatusSnapshot, StatusTransformation};
-use crate::recognition::CommandModelStatus;
 use crate::text_input::{
     Changed as TextChanged, Dismissed as TextDismissed, Navigate as TextNavigate,
     Submitted as TextSubmitted, TextInput,
@@ -71,11 +64,8 @@ const MINIMUM_WIDTH: f32 = 860.0;
 const MINIMUM_HEIGHT: f32 = 560.0;
 const HOTKEY_MIN_WIDTH: f32 = 148.0;
 const HOTKEY_SIDE_SELECTOR_WIDTH: f32 = 116.0;
-const OPENCODE_INSTALL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const PERMISSION_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_OPENCODE_ERROR_BYTES: usize = 4 * 1024;
 const ACTIVITY_LIMIT: usize = 100;
-const OPENCODE_BETA_DOCS_URL: &str = "https://v2.opencode.ai/";
 
 fn sidebar_update_button(
     status: crate::sparkle::UpdateStatus,
@@ -139,26 +129,20 @@ actions!(
     [
         CloseWindow,
         CheckForUpdates,
-        RetryCommands,
         HideApplication,
         MinimizeWindow,
         QuitApplication,
-        ShowCommands,
         ShowHistory,
         ShowModes,
         ShowSettings,
-        ShowVoiceAction,
         ToggleFullscreen,
     ]
 );
 
 /// Opens the app shell, or focuses and refreshes an existing shell window.
-#[allow(clippy::too_many_arguments)]
 pub fn open_or_focus(
     app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
     event_path: PathBuf,
-    commands: CommandConfig,
-    meeting_requests: SyncSender<MeetingRequest>,
     indicator: DictationIndicatorSender,
     recognition_start: Option<SyncSender<()>>,
     history: Option<History>,
@@ -170,7 +154,6 @@ pub fn open_or_focus(
                 if this.event_reader.path() != event_path {
                     this.event_reader = EventReader::open(event_path.clone());
                 }
-                this.meeting_requests = meeting_requests.clone();
                 this.indicator = indicator.clone();
                 this.recognition_start = recognition_start.clone();
                 this.history = history.clone();
@@ -186,8 +169,6 @@ pub fn open_or_focus(
     open_new(
         app_window,
         event_path,
-        commands,
-        meeting_requests,
         indicator,
         recognition_start,
         history,
@@ -260,8 +241,6 @@ pub fn refresh_transcription_menu(
 pub fn open_preview(
     app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
     event_path: PathBuf,
-    commands: CommandConfig,
-    meeting_requests: SyncSender<MeetingRequest>,
     indicator: DictationIndicatorSender,
     preview: AppWindowPreview,
     cx: &mut App,
@@ -277,8 +256,6 @@ pub fn open_preview(
     open_new(
         app_window,
         event_path,
-        commands,
-        meeting_requests,
         indicator,
         None,
         None,
@@ -287,12 +264,9 @@ pub fn open_preview(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn open_new(
     app_window: &Rc<RefCell<Option<WindowHandle<AppWindow>>>>,
     event_path: PathBuf,
-    commands: CommandConfig,
-    meeting_requests: SyncSender<MeetingRequest>,
     indicator: DictationIndicatorSender,
     recognition_start: Option<SyncSender<()>>,
     history: Option<History>,
@@ -319,8 +293,6 @@ fn open_new(
             cx.new(|cx| {
                 AppWindow::new(
                     event_path,
-                    commands,
-                    meeting_requests,
                     indicator,
                     recognition_start,
                     history,
@@ -339,12 +311,9 @@ fn open_new(
 #[derive(Clone, Copy)]
 pub enum PreviewPane {
     HudLab,
-    Meetings,
-    Commands,
     Activity,
     History,
     Modes,
-    VoiceAction,
     Replacements,
     Settings,
 }
@@ -363,29 +332,20 @@ pub struct AppWindowPreview {
     pub pane: PreviewPane,
     pub transcription_picker: Option<(String, PreviewModelState)>,
     pub onboarding: bool,
-    pub collapse_mode_processing: bool,
-    pub open_transformation_picker: bool,
     pub select_global_mode: bool,
-    pub voice_action_enabled: bool,
-    pub opencode_unavailable: bool,
     pub permissions_missing: bool,
     pub model_missing: bool,
-    pub command_model_missing: bool,
     pub open_history_retention: bool,
-    pub confirm_release_microphone: bool,
     pub update_available: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum Pane {
     HudLab,
-    Meetings,
-    Commands,
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
     Activity,
     History,
     Modes,
-    VoiceAction,
     #[default]
     Settings,
 }
@@ -420,14 +380,11 @@ impl Pane {
         }
     }
 
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 5] = [
         Self::Settings,
         Self::Modes,
-        Self::Commands,
-        Self::VoiceAction,
         Self::History,
         Self::HudLab,
-        Self::Meetings,
         Self::Activity,
     ];
 
@@ -437,11 +394,8 @@ impl Pane {
             .filter(|pane| match pane {
                 Self::Settings => true,
                 Self::Modes => capabilities.modes,
-                Self::Commands => capabilities.commands,
-                Self::VoiceAction => capabilities.voice_action,
                 Self::History => capabilities.history,
                 Self::HudLab => capabilities.hud_lab,
-                Self::Meetings => capabilities.meetings,
                 Self::Activity => capabilities.activity,
             })
             .collect()
@@ -450,12 +404,9 @@ impl Pane {
     fn label(self) -> &'static str {
         match self {
             Self::HudLab => "HUD Lab",
-            Self::Meetings => "Meetings",
-            Self::Commands => "Commands",
             Self::Activity => "Activity",
             Self::History => "History",
             Self::Modes => "Modes",
-            Self::VoiceAction => "Voice Action",
             Self::Settings => "Settings",
         }
     }
@@ -464,10 +415,7 @@ impl Pane {
         match self {
             Self::Settings => NavigationIcon::Settings,
             Self::Modes => NavigationIcon::Modes,
-            Self::VoiceAction => NavigationIcon::VoiceAction,
             Self::History => NavigationIcon::History,
-            Self::Commands => NavigationIcon::Commands,
-            Self::Meetings => NavigationIcon::Meetings,
             Self::Activity => NavigationIcon::Activity,
             Self::HudLab => NavigationIcon::HudLab,
         }
@@ -476,95 +424,13 @@ impl Pane {
     fn from_preview(pane: PreviewPane) -> Self {
         match pane {
             PreviewPane::HudLab => Self::HudLab,
-            PreviewPane::Meetings => Self::Meetings,
-            PreviewPane::Commands => Self::Commands,
             PreviewPane::Activity => Self::Activity,
             PreviewPane::History => Self::History,
             PreviewPane::Modes => Self::Modes,
-            PreviewPane::VoiceAction => Self::VoiceAction,
             PreviewPane::Replacements => Self::Modes,
             PreviewPane::Settings => Self::Settings,
         }
     }
-
-    fn from_developer(pane: crate::developer_control::DeveloperPane) -> Self {
-        use crate::developer_control::DeveloperPane;
-        match pane {
-            DeveloperPane::Settings => Self::Settings,
-            DeveloperPane::Modes => Self::Modes,
-            DeveloperPane::VoiceAction => Self::VoiceAction,
-            DeveloperPane::Replacements => Self::Modes,
-            DeveloperPane::History => Self::History,
-            DeveloperPane::HudLab => Self::HudLab,
-            DeveloperPane::Commands => Self::Commands,
-            DeveloperPane::Meetings => Self::Meetings,
-            DeveloperPane::Activity => Self::Activity,
-        }
-    }
-
-    fn developer(self) -> crate::developer_control::DeveloperPane {
-        use crate::developer_control::DeveloperPane;
-        match self {
-            Self::Settings => DeveloperPane::Settings,
-            Self::Modes => DeveloperPane::Modes,
-            Self::VoiceAction => DeveloperPane::VoiceAction,
-            Self::History => DeveloperPane::History,
-            Self::HudLab => DeveloperPane::HudLab,
-            Self::Commands => DeveloperPane::Commands,
-            Self::Meetings => DeveloperPane::Meetings,
-            Self::Activity => DeveloperPane::Activity,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct CatalogCommand {
-    task: String,
-    scope: CommandScope,
-    phrase: String,
-    aliases: Vec<String>,
-    description: String,
-    id: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PersonalWorkspaceState {
-    Missing,
-    Creating,
-    Ready,
-    Error,
-}
-
-fn personal_workspace_state(
-    config_exists: bool,
-    creating: bool,
-    status: &StatusSnapshot,
-) -> PersonalWorkspaceState {
-    if creating {
-        PersonalWorkspaceState::Creating
-    } else if config_exists {
-        if status.host_state == HostState::Unavailable && status.active_generation.is_none() {
-            PersonalWorkspaceState::Error
-        } else {
-            PersonalWorkspaceState::Ready
-        }
-    } else {
-        PersonalWorkspaceState::Missing
-    }
-}
-
-#[derive(Clone, PartialEq)]
-struct TranscriptLine {
-    source: String,
-    text: String,
-    pause_before_ms: Option<u64>,
-}
-
-#[derive(Clone)]
-enum MeetingTranscript {
-    Empty,
-    Loaded(Vec<TranscriptLine>),
-    Unavailable(String),
 }
 
 struct ToggleSpring {
@@ -582,10 +448,6 @@ struct ProcessingInput {
 struct ModeInputs {
     name: ProcessingInput,
     browser_hosts: ProcessingInput,
-    prompt: ProcessingInput,
-    model: ProcessingInput,
-    deadline: ProcessingInput,
-    processing_toggle: ToggleSpring,
     replacements: Vec<ReplacementInputs>,
 }
 
@@ -594,186 +456,15 @@ struct ProcessingInputs {
     modes: Vec<ModeInputs>,
 }
 
-struct VoiceActionInputs {
-    model: ProcessingInput,
-    enabled_toggle: ToggleSpring,
-    error: Option<String>,
-}
-
 struct ReplacementInputs {
     matched_phrase: ProcessingInput,
     output: ProcessingInput,
-}
-
-#[derive(Clone)]
-struct TransformationDrag {
-    selection: ModeSelection,
-    id: String,
-    name: String,
-    position: Point<Pixels>,
-}
-
-impl TransformationDrag {
-    fn at(mut self, position: Point<Pixels>) -> Self {
-        self.position = position;
-        self
-    }
-}
-
-impl Render for TransformationDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .pl(self.position.x - px(90.0))
-            .pt(self.position.y - px(17.0))
-            .child(
-                div()
-                    .w(px(180.0))
-                    .h(px(34.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgb(0x505050))
-                    .bg(rgb(SURFACE_SELECTED))
-                    .text_size(px(11.0))
-                    .text_color(rgb(TEXT))
-                    .child(self.name.clone()),
-            )
-    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ModeSelection {
     Default,
     Custom(usize),
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ModelPickerTarget {
-    Mode(ModeSelection),
-    VoiceAction,
-}
-
-/// Shared parts of the OpenCode model picker rendered by every surface that
-/// selects a model: Modes processing and Voice Action.
-struct ProcessingPicker {
-    catalog_status: String,
-    model_control: AnyElement,
-    refresh_control: Option<AnyElement>,
-    suggestions: Option<Div>,
-    has_variants: bool,
-    variant_control: Div,
-}
-
-enum ModelCatalogState {
-    Loading,
-    Loaded(ModelCatalog),
-    Missing,
-    Failed(String),
-}
-
-struct OpenCodeUnavailableCopy<'a> {
-    title: &'static str,
-    description: &'static str,
-    error: Option<&'a str>,
-    can_retry: bool,
-    retry_label: &'static str,
-    can_open_setup: bool,
-}
-
-#[derive(Clone, Copy)]
-enum OpenCodeFeature {
-    VoiceAction,
-    Transformation,
-}
-
-fn opencode_unavailable_copy(
-    state: &ModelCatalogState,
-    feature: OpenCodeFeature,
-) -> Option<OpenCodeUnavailableCopy<'_>> {
-    match state {
-        ModelCatalogState::Loading => Some(OpenCodeUnavailableCopy {
-            title: "Checking for OpenCode",
-            description: match feature {
-                OpenCodeFeature::VoiceAction => {
-                    "Voice Action will be available after HEX connects to OpenCode."
-                }
-                OpenCodeFeature::Transformation => {
-                    "OpenCode transformation will be available after HEX connects to OpenCode."
-                }
-            },
-            error: None,
-            can_retry: false,
-            retry_label: "Retry",
-            can_open_setup: false,
-        }),
-        ModelCatalogState::Missing => Some(OpenCodeUnavailableCopy {
-            title: match feature {
-                OpenCodeFeature::VoiceAction => "Voice Action requires OpenCode",
-                OpenCodeFeature::Transformation => "Transformation requires OpenCode",
-            },
-            description: match feature {
-                OpenCodeFeature::VoiceAction => {
-                    "Install and configure OpenCode to turn spoken instructions into paste-ready text."
-                }
-                OpenCodeFeature::Transformation => {
-                    "Install and configure OpenCode to transform dictated text."
-                }
-            },
-            error: None,
-            can_retry: true,
-            retry_label: "Check again",
-            can_open_setup: true,
-        }),
-        ModelCatalogState::Failed(error) => Some(OpenCodeUnavailableCopy {
-            title: "OpenCode is unavailable",
-            description: "HEX could not load the OpenCode model catalog.",
-            error: Some(error),
-            can_retry: true,
-            retry_label: "Retry",
-            can_open_setup: false,
-        }),
-        ModelCatalogState::Loaded(_) => None,
-    }
-}
-
-fn bounded_opencode_error(error: &str) -> String {
-    if error.len() <= MAX_OPENCODE_ERROR_BYTES {
-        return error.into();
-    }
-    let mut end = MAX_OPENCODE_ERROR_BYTES;
-    while !error.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &error[..end])
-}
-
-fn start_model_catalog_load() -> Receiver<ModelCatalogState> {
-    let (sender, receiver) = sync_channel(1);
-    thread::spawn(move || {
-        let state = if crate::dictation_processor::opencode_installed() {
-            match crate::dictation_processor::load_model_catalog() {
-                Ok(catalog) => ModelCatalogState::Loaded(catalog),
-                Err(error) => {
-                    let error = bounded_opencode_error(&error.to_string());
-                    tracing::warn!(%error, "could not load OpenCode model catalog");
-                    ModelCatalogState::Failed(error)
-                }
-            }
-        } else {
-            ModelCatalogState::Missing
-        };
-        let _ = sender.send(state);
-    });
-    receiver
-}
-
-struct ModelPresentation {
-    name: String,
-    provider: String,
-    key: String,
-    is_default: bool,
 }
 
 enum ApplicationCatalogState {
@@ -784,16 +475,20 @@ enum ApplicationCatalogState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HotkeyKind {
     Dictation,
-    Edit,
+    DictationAlternative(usize),
     PasteLast,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MicrophonePolicyChange {
-    SetCommands(bool),
-    SetReleaseWhileIdle(bool),
-    KeepReadyAndEnableCommands,
-    DisableCommandsAndRelease,
+impl HotkeyKind {
+    fn element_id(self, suffix: &'static str) -> ElementId {
+        match self {
+            Self::Dictation => ElementId::Name(format!("dictation-hotkey-{suffix}").into()),
+            Self::DictationAlternative(index) => {
+                ElementId::named_usize(format!("dictation-alternative-hotkey-{suffix}"), index)
+            }
+            Self::PasteLast => ElementId::Name(format!("paste-last-hotkey-{suffix}").into()),
+        }
+    }
 }
 
 enum HotkeyCaptureState {
@@ -874,10 +569,6 @@ impl ToggleSpring {
     fn is_settled(&self) -> bool {
         (self.position - self.target).abs() < 0.001 && self.velocity.abs() < 0.01
     }
-
-    fn enabled(&self) -> bool {
-        self.target >= 0.5
-    }
 }
 
 /// Root GPUI entity for the production app shell.
@@ -886,7 +577,6 @@ pub struct AppWindow {
     pane: Pane,
     event_reader: EventReader,
     activity: DesktopActivity,
-    meeting_requests: SyncSender<MeetingRequest>,
     indicator: DictationIndicatorSender,
     hud_tuning: HudTuning,
     hud_demo: HudDemoState,
@@ -908,16 +598,12 @@ pub struct AppWindow {
     launch_at_login_toggle: ToggleSpring,
     update_status: crate::sparkle::UpdateStatus,
     update_status_changed_at: Instant,
-    commands_toggle: ToggleSpring,
-    command_model_status: CommandModelStatus,
     release_microphone_toggle: ToggleSpring,
-    pending_microphone_policy: Option<MicrophonePolicyChange>,
     double_tap_toggle: ToggleSpring,
     double_tap_only_visibility: ToggleSpring,
     dock_icon_toggle: ToggleSpring,
     sound_volume_spring: ToggleSpring,
     recording_audio_spring: ToggleSpring,
-    variant_picker_open: Option<ModelPickerTarget>,
     transcription_hints: ProcessingInput,
     transcription_picker_language: Option<String>,
     transcription_picker_error: Option<String>,
@@ -927,19 +613,13 @@ pub struct AppWindow {
     transcription_activation_started: Option<Instant>,
     transcription_preview_installed: Option<bool>,
     processing_inputs: ProcessingInputs,
-    voice_action_inputs: VoiceActionInputs,
     selected_mode: ModeSelection,
-    model_catalog: ModelCatalogState,
-    model_catalog_receiver: Option<Receiver<ModelCatalogState>>,
-    model_catalog_retry_at: Instant,
     application_catalog: ApplicationCatalogState,
     application_catalog_receiver: Option<Receiver<Vec<InstalledApplication>>>,
     application_search: ProcessingInput,
     application_picker_open: bool,
     application_picker_error: Option<String>,
-    transformation_picker_open: bool,
     application_picker_highlight: usize,
-    model_picker_highlight: usize,
     mode_delete_armed: bool,
     mode_context_menu: Option<Point<Pixels>>,
     settings_save_generation: u64,
@@ -947,31 +627,12 @@ pub struct AppWindow {
     hotkey_capture: HotkeyCaptureState,
     hotkey_capture_animation: ToggleSpring,
     hotkey_width_spring: ToggleSpring,
-    hotkey_side_animations: [ToggleSpring; 3],
-    hotkey_side_selection_springs: [ToggleSpring; 3],
+    hotkey_side_animations: [ToggleSpring; 2],
+    hotkey_side_selection_springs: [ToggleSpring; 2],
     window_focus: FocusHandle,
     hotkey_focus: FocusHandle,
     _hotkey_blur_subscription: Subscription,
     _activation_subscription: Subscription,
-    meetings: Vec<MeetingManifest>,
-    meetings_error: Option<String>,
-    meeting_runtime_error: Option<String>,
-    meeting_refresh_started_ms: Option<u64>,
-    meeting_stop_pending: bool,
-    selected_meeting: Option<String>,
-    meeting_transcript: MeetingTranscript,
-    meeting_transcript_id: Option<String>,
-    meeting_transcript_reader: meeting::TranscriptReader,
-    meeting_transcript_scroll: ScrollHandle,
-    compiled_commands: Vec<CatalogCommand>,
-    commands: Vec<CatalogCommand>,
-    personal_commands_status: StatusSnapshot,
-    personal_workspace: PathBuf,
-    personal_workspace_receiver: Option<Receiver<Result<PathBuf, String>>>,
-    personal_workspace_error: Option<String>,
-    personal_commands_prompt_copied: bool,
-    command_search: ProcessingInput,
-    selected_command: Option<String>,
     events: Vec<VoiceEvent>,
     current_context: (Option<String>, Option<String>),
     selected_event: Option<usize>,
@@ -989,8 +650,6 @@ impl AppWindow {
     #[allow(clippy::too_many_arguments)]
     fn new(
         event_path: PathBuf,
-        commands: CommandConfig,
-        meeting_requests: SyncSender<MeetingRequest>,
         indicator: DictationIndicatorSender,
         recognition_start: Option<SyncSender<()>>,
         history: Option<History>,
@@ -1003,22 +662,10 @@ impl AppWindow {
                 Timer::after(Duration::from_millis(500)).await;
                 if window
                     .update(cx, |window, cx| {
-                        let model_catalog_changed = window.poll_model_catalog();
-                        window.retry_model_catalog();
                         let application_catalog_changed = window.poll_application_catalog();
                         let transcription_changed = window.poll_transcription_download();
                         let setup_changed = window.poll_setup(false);
-                        let command_model_status = if window.preview {
-                            window.command_model_status
-                        } else {
-                            crate::recognition::command_model_status()
-                        };
-                        let command_model_changed =
-                            window.command_model_status != command_model_status;
-                        window.command_model_status = command_model_status;
                         let login_item_changed = window.poll_login_item();
-                        let personal_commands_changed = window.poll_personal_commands();
-                        let personal_workspace_changed = window.poll_personal_workspace();
                         let history_changed = window.poll_history(cx);
                         let update_status = if window.preview {
                             window.update_status
@@ -1037,21 +684,10 @@ impl AppWindow {
                             window.update_status = crate::sparkle::UpdateStatus::Idle;
                             crate::sparkle::clear_confirmation();
                         }
-                        if crate::DEVELOPER_FEATURES_ENABLED
-                            && (window.meeting_refresh_started_ms.is_some()
-                                || meeting::active(&window.meetings).is_some())
-                        {
-                            window.reload_meetings();
-                            cx.notify();
-                        }
-                        if model_catalog_changed
-                            || application_catalog_changed
+                        if application_catalog_changed
                             || transcription_changed
                             || setup_changed
-                            || command_model_changed
                             || login_item_changed
-                            || personal_commands_changed
-                            || personal_workspace_changed
                             || history_changed
                             || update_status_changed
                             || update_confirmation_expired
@@ -1069,12 +705,7 @@ impl AppWindow {
         let preview_mode = preview.is_some();
         let preview_choices = crate::transcription_models::choices_for_runtime;
         let (settings, settings_load_error) = if let Some(preview) = &preview {
-            let mut settings = AppSettings {
-                commands_enabled: preview.command_model_missing
-                    || preview.confirm_release_microphone,
-                ..AppSettings::default()
-            };
-            settings.voice_action.enabled = preview.voice_action_enabled;
+            let mut settings = AppSettings::default();
             if let Some((language, _)) = &preview.transcription_picker
                 && let Some(choice) = preview_choices(language).first()
             {
@@ -1082,7 +713,7 @@ impl AppWindow {
                 settings.transcription.language = language.clone();
             }
             if matches!(preview.pane, PreviewPane::Modes | PreviewPane::Replacements) {
-                let mut mode = DictationMode {
+                settings.dictation_processing.modes.push(DictationMode {
                     name: "Work notes".into(),
                     applications: vec!["Zed".into()],
                     browser_hosts: vec!["github.com".into()],
@@ -1090,15 +721,7 @@ impl AppWindow {
                         matched_phrase: "open code".into(),
                         output: "OpenCode".into(),
                     }],
-                    transformations: vec!["smart-punctuation".into(), "normalize-links".into()],
-                    ..DictationMode::default()
-                };
-                mode.post_processing.enabled = !preview.collapse_mode_processing;
-                mode.post_processing.prompt =
-                    "Tighten prose and preserve technical terminology.".into();
-                mode.post_processing.model = Some("anthropic/claude-sonnet-4".into());
-                mode.post_processing.variant = Some("medium".into());
-                settings.dictation_processing.modes.push(mode);
+                });
             }
             (settings, None)
         } else {
@@ -1116,29 +739,6 @@ impl AppWindow {
         let transcription_hints =
             Self::transcription_hints_input(&settings.transcription.recognition_hints, cx);
         let processing_inputs = Self::processing_inputs(&settings, cx);
-        let voice_action_inputs = Self::voice_action_inputs(&settings, cx);
-        let (model_catalog, model_catalog_receiver) = if preview
-            .as_ref()
-            .is_some_and(|preview| preview.opencode_unavailable)
-        {
-            (ModelCatalogState::Missing, None)
-        } else if preview_mode {
-            (
-                ModelCatalogState::Loaded(ModelCatalog {
-                    models: vec![ModelChoice {
-                        key: "anthropic/claude-sonnet-4".into(),
-                        name: "Claude Sonnet 4".into(),
-                        provider: "Anthropic".into(),
-                        variants: vec!["low".into(), "medium".into(), "high".into()],
-                    }],
-                    default_key: Some("anthropic/claude-sonnet-4".into()),
-                    default_name: Some("Claude Sonnet 4".into()),
-                }),
-                None,
-            )
-        } else {
-            (ModelCatalogState::Loading, Some(start_model_catalog_load()))
-        };
         let application_catalog = if preview_mode {
             ApplicationCatalogState::Loaded(Vec::new())
         } else {
@@ -1160,49 +760,6 @@ impl AppWindow {
                     }
                 }
             });
-        let compiled_commands = commands
-            .catalog()
-            .into_iter()
-            .map(|command| CatalogCommand {
-                task: command_task(&command),
-                scope: command.scope,
-                phrase: command.phrase,
-                aliases: command.aliases,
-                description: command.description,
-                id: command.id,
-            })
-            .collect::<Vec<_>>();
-        let personal_workspace = if preview_mode {
-            PathBuf::from("~/.config/hex")
-        } else {
-            crate::app_paths::personal_commands_workspace()
-                .unwrap_or_else(|_| PathBuf::from("~/.config/hex"))
-        };
-        let mut personal_commands_status = if preview_mode {
-            StatusSnapshot {
-                transformations: vec![
-                    StatusTransformation {
-                        id: "smart-punctuation".into(),
-                        name: "Smart punctuation".into(),
-                        description: None,
-                    },
-                    StatusTransformation {
-                        id: "normalize-links".into(),
-                        name: "Normalize links".into(),
-                        description: None,
-                    },
-                ],
-                ..StatusSnapshot::default()
-            }
-        } else {
-            crate::personal_commands::load_status().unwrap_or_else(|error| StatusSnapshot {
-                host_state: HostState::Unavailable,
-                last_reload_error: Some(error.to_string()),
-                ..StatusSnapshot::default()
-            })
-        };
-        crate::personal_commands::include_builtin_transformations(&mut personal_commands_status);
-        let commands = merged_catalog(&compiled_commands, &personal_commands_status);
         let preview_picker = preview
             .as_ref()
             .and_then(|preview| preview.transcription_picker.as_ref());
@@ -1274,7 +831,6 @@ impl AppWindow {
             history
         };
         let history_search = Self::history_search_input(cx);
-        let command_search = Self::command_search_input(cx);
         let mut window = Self {
             preview: preview_mode,
             pane: preview
@@ -1282,7 +838,6 @@ impl AppWindow {
                 .map_or(Pane::default(), |preview| Pane::from_preview(preview.pane)),
             event_reader: EventReader::open(event_path),
             activity: DesktopActivity::default(),
-            meeting_requests,
             indicator,
             hud_tuning: HudTuning::default(),
             hud_demo: HudDemoState::Transcribing,
@@ -1312,22 +867,7 @@ impl AppWindow {
                 crate::sparkle::status()
             },
             update_status_changed_at: Instant::now(),
-            commands_toggle: ToggleSpring::new(settings.commands_enabled),
-            command_model_status: if preview
-                .as_ref()
-                .is_some_and(|preview| preview.command_model_missing)
-            {
-                CommandModelStatus::Failed
-            } else if preview_mode {
-                CommandModelStatus::Disabled
-            } else {
-                crate::recognition::command_model_status()
-            },
             release_microphone_toggle: ToggleSpring::new(settings.release_microphone_while_idle),
-            pending_microphone_policy: preview
-                .as_ref()
-                .filter(|preview| preview.confirm_release_microphone)
-                .map(|_| MicrophonePolicyChange::DisableCommandsAndRelease),
             double_tap_toggle: ToggleSpring::new(settings.double_tap_lock),
             double_tap_only_visibility: ToggleSpring::new(
                 settings.double_tap_lock && settings.dictation_hotkey.key.is_some(),
@@ -1337,7 +877,6 @@ impl AppWindow {
             recording_audio_spring: ToggleSpring::at(recording_audio_index(
                 settings.recording_audio_behavior,
             ) as f32),
-            variant_picker_open: None,
             transcription_hints,
             transcription_picker_language: preview_picker.map(|(language, _)| language.clone()),
             transcription_picker_error: matches!(
@@ -1365,7 +904,6 @@ impl AppWindow {
                 Some(PreviewModelState::Actual) | None => preview_model_missing.then_some(false),
             },
             processing_inputs,
-            voice_action_inputs,
             selected_mode: if preview
                 .as_ref()
                 .is_some_and(|preview| preview.select_global_mode)
@@ -1378,19 +916,12 @@ impl AppWindow {
             } else {
                 ModeSelection::Default
             },
-            model_catalog,
-            model_catalog_receiver,
-            model_catalog_retry_at: Instant::now() + OPENCODE_INSTALL_RETRY_INTERVAL,
             application_catalog,
             application_catalog_receiver: None,
             application_search,
             application_picker_open: false,
             application_picker_error: None,
-            transformation_picker_open: preview
-                .as_ref()
-                .is_some_and(|preview| preview.open_transformation_picker),
             application_picker_highlight: 0,
-            model_picker_highlight: 0,
             mode_delete_armed: false,
             mode_context_menu: None,
             settings_save_generation: 0,
@@ -1400,7 +931,6 @@ impl AppWindow {
             hotkey_width_spring: ToggleSpring::at(HOTKEY_MIN_WIDTH),
             hotkey_side_animations: [
                 ToggleSpring::new(standalone_modifier_side(&settings.dictation_hotkey).is_some()),
-                ToggleSpring::new(standalone_modifier_side(&settings.edit_hotkey).is_some()),
                 ToggleSpring::new(
                     settings
                         .paste_last_hotkey
@@ -1413,9 +943,6 @@ impl AppWindow {
                 ToggleSpring::at(hotkey_side_index(
                     standalone_modifier_side(&settings.dictation_hotkey)
                         .unwrap_or(ModifierSide::Either),
-                ) as f32),
-                ToggleSpring::at(hotkey_side_index(
-                    standalone_modifier_side(&settings.edit_hotkey).unwrap_or(ModifierSide::Either),
                 ) as f32),
                 ToggleSpring::at(hotkey_side_index(
                     settings
@@ -1431,25 +958,6 @@ impl AppWindow {
             _activation_subscription: activation_subscription,
             settings,
             settings_load_error,
-            meetings: Vec::new(),
-            meetings_error: None,
-            meeting_runtime_error: None,
-            meeting_refresh_started_ms: None,
-            meeting_stop_pending: false,
-            selected_meeting: None,
-            meeting_transcript: MeetingTranscript::Empty,
-            meeting_transcript_id: None,
-            meeting_transcript_reader: meeting::TranscriptReader::default(),
-            meeting_transcript_scroll: ScrollHandle::new(),
-            compiled_commands,
-            commands,
-            personal_commands_status,
-            personal_workspace,
-            personal_workspace_receiver: None,
-            personal_workspace_error: None,
-            personal_commands_prompt_copied: false,
-            command_search,
-            selected_command: None,
             events: Vec::new(),
             current_context: (None, None),
             selected_event: None,
@@ -1465,12 +973,6 @@ impl AppWindow {
             history_copied: None,
         };
         if !window.preview {
-            if crate::DEVELOPER_FEATURES_ENABLED {
-                window.reload_meetings();
-                if meeting::active(&window.meetings).is_some() {
-                    window.pane = Pane::Meetings;
-                }
-            }
             window.reload_events();
         }
         window.reload_history(cx);
@@ -1486,13 +988,10 @@ impl AppWindow {
         window
     }
 
-    /// Refreshes disk-backed meeting and activity data while retaining valid
-    /// selections. This is also called whenever an existing shell is reopened.
+    /// Refreshes disk-backed activity data while retaining valid selections.
+    /// This is also called whenever an existing shell is reopened.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if !self.preview {
-            if crate::DEVELOPER_FEATURES_ENABLED {
-                self.reload_meetings();
-            }
             self.reload_events();
         }
         self.reload_history(cx);
@@ -1512,14 +1011,11 @@ impl AppWindow {
         self.pane = pane;
         self.mode_context_menu = None;
         self.history_retention_open = false;
-        self.pending_microphone_policy = None;
         match pane {
             Pane::HudLab => self.apply_hud_lab(),
-            Pane::Meetings => self.reload_meetings(),
-            Pane::Commands | Pane::Activity => self.reload_events(),
+            Pane::Activity => self.reload_events(),
             Pane::History => self.reload_history(cx),
             Pane::Modes => self.ensure_application_catalog_load(),
-            Pane::VoiceAction => {}
             Pane::Settings => self.permission_refresh_at = Instant::now(),
         }
         cx.notify();
@@ -1536,97 +1032,23 @@ impl AppWindow {
         cx.notify();
     }
 
-    pub(crate) fn developer_select_pane(
-        &mut self,
-        pane: crate::developer_control::DeveloperPane,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_pane(Pane::from_developer(pane), cx);
-    }
-
-    pub(crate) fn developer_pane(&self) -> crate::developer_control::DeveloperPane {
-        self.pane.developer()
-    }
-
-    pub(crate) fn developer_set_commands_enabled(
+    fn set_release_microphone_while_idle(
         &mut self,
         enabled: bool,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        self.update_microphone_policy(MicrophonePolicyChange::SetCommands(enabled), cx)
-            .map_err(|error| error.to_string())
-    }
-
-    fn update_microphone_policy(
-        &mut self,
-        change: MicrophonePolicyChange,
-        cx: &mut Context<Self>,
     ) -> color_eyre::Result<()> {
         let mut candidate = self.settings.clone();
-        match change {
-            MicrophonePolicyChange::SetCommands(enabled) => {
-                candidate.set_commands_enabled(enabled)?
-            }
-            MicrophonePolicyChange::SetReleaseWhileIdle(enabled) => {
-                candidate.set_release_microphone_while_idle(enabled)?
-            }
-            MicrophonePolicyChange::KeepReadyAndEnableCommands => {
-                candidate.keep_microphone_ready_and_enable_commands()
-            }
-            MicrophonePolicyChange::DisableCommandsAndRelease => {
-                candidate.disable_commands_and_release_microphone()
-            }
-        }
+        candidate.release_microphone_while_idle = enabled;
         if !self.preview {
             candidate.save()?;
         }
         self.settings = candidate;
-        self.commands_toggle
-            .set_enabled(self.settings.commands_enabled);
-        self.release_microphone_toggle
-            .set_enabled(self.settings.release_microphone_while_idle);
-        self.pending_microphone_policy = None;
+        self.release_microphone_toggle.set_enabled(enabled);
         self.settings_save_generation = self.settings_save_generation.wrapping_add(1);
         self.settings_dirty = false;
         self.settings_load_error = None;
         cx.notify();
         Ok(())
-    }
-
-    fn poll_model_catalog(&mut self) -> bool {
-        let Some(receiver) = &self.model_catalog_receiver else {
-            return false;
-        };
-        let Ok(result) = receiver.try_recv() else {
-            return false;
-        };
-        self.model_catalog = result;
-        self.model_catalog_receiver = None;
-        true
-    }
-
-    fn retry_model_catalog(&mut self) {
-        if !matches!(&self.model_catalog, ModelCatalogState::Missing)
-            || self.model_catalog_receiver.is_some()
-            || Instant::now() < self.model_catalog_retry_at
-        {
-            return;
-        }
-        self.model_catalog_retry_at = Instant::now() + OPENCODE_INSTALL_RETRY_INTERVAL;
-        self.model_catalog_receiver = Some(start_model_catalog_load());
-    }
-
-    fn reload_model_catalog(&mut self) {
-        if self.preview || self.model_catalog_receiver.is_some() {
-            return;
-        }
-        self.model_catalog = ModelCatalogState::Loading;
-        self.model_catalog_retry_at = Instant::now() + OPENCODE_INSTALL_RETRY_INTERVAL;
-        self.model_catalog_receiver = Some(start_model_catalog_load());
-    }
-
-    fn opencode_available(&self) -> bool {
-        matches!(&self.model_catalog, ModelCatalogState::Loaded(_))
     }
 
     fn poll_application_catalog(&mut self) -> bool {
@@ -1735,61 +1157,6 @@ impl AppWindow {
         true
     }
 
-    fn poll_personal_commands(&mut self) -> bool {
-        if self.preview {
-            return false;
-        }
-        let Ok(mut status) = crate::personal_commands::load_status() else {
-            return false;
-        };
-        crate::personal_commands::include_builtin_transformations(&mut status);
-        if status == self.personal_commands_status {
-            return false;
-        }
-        self.personal_commands_status = status;
-        self.commands = merged_catalog(&self.compiled_commands, &self.personal_commands_status);
-        if self
-            .selected_command
-            .as_ref()
-            .is_some_and(|id| !self.commands.iter().any(|command| &command.id == id))
-        {
-            self.selected_command = None;
-        }
-        true
-    }
-
-    fn poll_personal_workspace(&mut self) -> bool {
-        let Some(receiver) = &self.personal_workspace_receiver else {
-            return false;
-        };
-        let Ok(result) = receiver.try_recv() else {
-            return false;
-        };
-        self.personal_workspace_receiver = None;
-        match result {
-            Ok(workspace) => {
-                self.personal_workspace = workspace;
-                self.personal_workspace_error = None;
-            }
-            Err(error) => self.personal_workspace_error = Some(error),
-        }
-        true
-    }
-
-    fn provision_personal_workspace(&mut self) {
-        if self.preview || self.personal_workspace_receiver.is_some() {
-            return;
-        }
-        let (sender, receiver) = sync_channel(1);
-        thread::spawn(move || {
-            let result =
-                crate::personal_commands::initialize_workspace().map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-        self.personal_workspace_error = None;
-        self.personal_workspace_receiver = Some(receiver);
-    }
-
     fn apply_transcription_selection(
         &mut self,
         selection: TranscriptionSelection,
@@ -1864,159 +1231,6 @@ impl AppWindow {
     fn transcription_model_installed(&self, model: &ModelDefinition, language: &str) -> bool {
         self.transcription_preview_installed
             .unwrap_or_else(|| crate::transcription_models::is_installed(model, language))
-    }
-
-    pub fn meeting_starting(&mut self, cx: &mut Context<Self>) {
-        self.meeting_runtime_error = None;
-        self.meeting_refresh_started_ms = Some(now_ms());
-        self.meeting_stop_pending = false;
-        self.pane = Pane::Meetings;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_started(&mut self, cx: &mut Context<Self>) {
-        self.meeting_refresh_started_ms = None;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_updated(&mut self, cx: &mut Context<Self>) {
-        self.meeting_stop_pending = true;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_finished(&mut self, cx: &mut Context<Self>) {
-        self.meeting_refresh_started_ms = None;
-        self.meeting_stop_pending = false;
-        self.reload_meetings();
-        cx.notify();
-    }
-
-    pub fn meeting_failed(&mut self, title: String, error: String, cx: &mut Context<Self>) {
-        self.meeting_runtime_error = Some(format!("{title}: {error}"));
-        self.meeting_refresh_started_ms = None;
-        self.meeting_stop_pending = false;
-        self.pane = Pane::Meetings;
-        self.reload_meetings();
-        if let Some(failed) = self
-            .meetings
-            .iter()
-            .find(|meeting| meeting.status == MeetingStatus::Failed && meeting.title == title)
-        {
-            self.selected_meeting = Some(failed.id.clone());
-            self.load_selected_meeting();
-        }
-        cx.notify();
-    }
-
-    fn reload_meetings(&mut self) {
-        match meeting::list() {
-            Ok(meetings) => {
-                let previous_active = meeting::active(&self.meetings).map(|meeting| &meeting.id);
-                let next_active = meeting::active(&meetings).map(|meeting| meeting.id.clone());
-                if next_active.as_deref() != previous_active.map(String::as_str)
-                    && next_active.is_some()
-                {
-                    self.selected_meeting = next_active;
-                }
-                if meeting::active(&meetings).is_none()
-                    && (previous_active.is_some()
-                        || self.meeting_refresh_started_ms.is_some_and(|started| {
-                            meetings.iter().any(|meeting| {
-                                meeting.created_at_ms >= started
-                                    && matches!(
-                                        meeting.status,
-                                        MeetingStatus::Complete
-                                            | MeetingStatus::Interrupted
-                                            | MeetingStatus::Failed
-                                    )
-                            })
-                        }))
-                {
-                    self.meeting_refresh_started_ms = None;
-                }
-                self.meetings = meetings;
-                if meeting::active(&self.meetings)
-                    .is_none_or(|meeting| meeting.status == MeetingStatus::Transcribing)
-                {
-                    self.meeting_stop_pending = false;
-                }
-                self.meetings_error = None;
-                if self
-                    .selected_meeting
-                    .as_ref()
-                    .is_some_and(|selected| !self.meetings.iter().any(|item| &item.id == selected))
-                {
-                    self.selected_meeting = None;
-                    self.meeting_transcript = MeetingTranscript::Empty;
-                } else if self.selected_meeting.is_some() {
-                    self.load_selected_meeting();
-                }
-            }
-            Err(error) => {
-                tracing::error!(%error, "could not list meetings");
-                self.meetings_error = Some(error.to_string());
-            }
-        }
-    }
-
-    fn load_selected_meeting(&mut self) {
-        let Some(id) = self.selected_meeting.clone() else {
-            self.meeting_transcript = MeetingTranscript::Empty;
-            self.meeting_transcript_id = None;
-            return;
-        };
-        let selection_changed = self.meeting_transcript_id.as_deref() != Some(&id);
-        if selection_changed {
-            self.meeting_transcript_id = Some(id.clone());
-            self.meeting_transcript_scroll = ScrollHandle::new();
-        }
-        let previous_lines = match &self.meeting_transcript {
-            MeetingTranscript::Loaded(lines) if !selection_changed => Some(lines.clone()),
-            MeetingTranscript::Empty
-            | MeetingTranscript::Loaded(_)
-            | MeetingTranscript::Unavailable(_) => None,
-        };
-        let was_following = previous_lines.as_ref().is_none_or(|lines| {
-            lines.is_empty()
-                || self.meeting_transcript_scroll.max_offset().height
-                    + self.meeting_transcript_scroll.offset().y
-                    <= px(48.0)
-        });
-        self.meeting_transcript = match self.meeting_transcript_reader.read(&id) {
-            Ok(entries) => MeetingTranscript::Loaded(
-                meeting::coalesce_transcript(entries)
-                    .into_iter()
-                    .scan(None, |previous_end, entry| {
-                        let pause_before_ms = previous_end
-                            .map(|end| entry.start_ms.saturating_sub(end))
-                            .filter(|pause| *pause >= 8_000);
-                        *previous_end =
-                            Some(previous_end.map_or(entry.end_ms, |end| end.max(entry.end_ms)));
-                        Some(TranscriptLine {
-                            source: format!(
-                                "{} {}",
-                                meeting::format_duration(entry.start_ms),
-                                entry.source.label()
-                            ),
-                            text: entry.text,
-                            pause_before_ms,
-                        })
-                    })
-                    .collect(),
-            ),
-            Err(error) => MeetingTranscript::Unavailable(error.to_string()),
-        };
-        if !selection_changed
-            && matches!(
-                &self.meeting_transcript,
-                MeetingTranscript::Loaded(lines) if was_following && previous_lines.as_ref() != Some(lines)
-            )
-        {
-            self.meeting_transcript_scroll.scroll_to_bottom();
-        }
     }
 
     fn reload_events(&mut self) {
@@ -2502,7 +1716,11 @@ impl AppWindow {
     ) -> AnyElement {
         let binding = match kind {
             HotkeyKind::Dictation => &self.settings.dictation_hotkey,
-            HotkeyKind::Edit => &self.settings.edit_hotkey,
+            HotkeyKind::DictationAlternative(index) => self
+                .settings
+                .dictation_hotkey_alternatives
+                .get(index)
+                .unwrap_or(&self.settings.dictation_hotkey),
             HotkeyKind::PasteLast => self
                 .settings
                 .paste_last_hotkey
@@ -2511,7 +1729,8 @@ impl AppWindow {
         };
         let binding_keycaps = match kind {
             HotkeyKind::Dictation => self.snapshot().dictation_shortcut,
-            HotkeyKind::Edit => binding.keycaps(),
+            HotkeyKind::DictationAlternative(_) if binding.is_empty() => vec!["Not set".into()],
+            HotkeyKind::DictationAlternative(_) => binding.keycaps(),
             HotkeyKind::PasteLast => self
                 .settings
                 .paste_last_hotkey
@@ -2608,11 +1827,7 @@ impl AppWindow {
                     )
                     .child(
                         div()
-                            .id(match kind {
-                                HotkeyKind::Dictation => "cancel-dictation-hotkey-capture",
-                                HotkeyKind::Edit => "cancel-edit-hotkey-capture",
-                                HotkeyKind::PasteLast => "cancel-paste-last-hotkey-capture",
-                            })
+                            .id(kind.element_id("cancel-capture"))
                             .h(px(26.0))
                             .ml_1()
                             .px_2()
@@ -2661,11 +1876,7 @@ impl AppWindow {
                 .into_any_element(),
         };
         div()
-            .id(match kind {
-                HotkeyKind::Dictation => "dictation-hotkey-control",
-                HotkeyKind::Edit => "edit-hotkey-control",
-                HotkeyKind::PasteLast => "paste-last-hotkey-control",
-            })
+            .id(kind.element_id("control"))
             .track_focus(&self.hotkey_focus)
             .w(px(control_width))
             .min_w(px(HOTKEY_MIN_WIDTH))
@@ -2703,6 +1914,54 @@ impl AppWindow {
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 this.capture_hotkey_modifiers(event, cx);
             }))
+            .into_any_element()
+    }
+
+    fn render_dictation_hotkey_alternatives(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let count = self.settings.dictation_hotkey_alternatives.len();
+        let rows = (0..count)
+            .map(|index| {
+                let control =
+                    self.render_hotkey_control(HotkeyKind::DictationAlternative(index), window, cx);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(control)
+                    .child(
+                        compact_button("×")
+                            .id(("remove-dictation-hotkey-alternative", index))
+                            .size(px(28.0))
+                            .px_0()
+                            .justify_center()
+                            .flex_none()
+                            .text_size(px(14.0))
+                            .text_color(rgb(MUTED))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_dictation_hotkey_alternative(index, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap_2()
+            .children(rows)
+            .child(
+                compact_plus_button()
+                    .id("add-dictation-hotkey-alternative")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_dictation_hotkey_alternative(window, cx);
+                    })),
+            )
             .into_any_element()
     }
 
@@ -2774,9 +2033,6 @@ impl AppWindow {
                                         return;
                                     };
                                     *binding = candidate;
-                                    if kind == HotkeyKind::Edit {
-                                        this.voice_action_inputs.error = None;
-                                    }
                                     this.hotkey_side_selection_springs[hotkey_kind_index(kind)]
                                         .set_target(index as f32);
                                     this.save_settings(cx);
@@ -2795,7 +2051,9 @@ impl AppWindow {
     fn hotkey_binding(&self, kind: HotkeyKind) -> Option<&HotkeyBinding> {
         match kind {
             HotkeyKind::Dictation => Some(&self.settings.dictation_hotkey),
-            HotkeyKind::Edit => Some(&self.settings.edit_hotkey),
+            HotkeyKind::DictationAlternative(index) => {
+                self.settings.dictation_hotkey_alternatives.get(index)
+            }
             HotkeyKind::PasteLast => self.settings.paste_last_hotkey.as_ref(),
         }
     }
@@ -2803,9 +2061,31 @@ impl AppWindow {
     fn hotkey_binding_mut(&mut self, kind: HotkeyKind) -> Option<&mut HotkeyBinding> {
         match kind {
             HotkeyKind::Dictation => Some(&mut self.settings.dictation_hotkey),
-            HotkeyKind::Edit => Some(&mut self.settings.edit_hotkey),
+            HotkeyKind::DictationAlternative(index) => {
+                self.settings.dictation_hotkey_alternatives.get_mut(index)
+            }
             HotkeyKind::PasteLast => self.settings.paste_last_hotkey.as_mut(),
         }
+    }
+
+    fn add_dictation_hotkey_alternative(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = HotkeyBinding {
+            modifiers: HotkeyModifiers::default(),
+            key: None,
+        };
+        self.settings.dictation_hotkey_alternatives.push(empty);
+        let index = self.settings.dictation_hotkey_alternatives.len() - 1;
+        self.begin_hotkey_capture(HotkeyKind::DictationAlternative(index), window, cx);
+    }
+
+    fn remove_dictation_hotkey_alternative(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.settings.dictation_hotkey_alternatives.len() {
+            return;
+        }
+        self.cancel_hotkey_capture(cx);
+        self.settings.dictation_hotkey_alternatives.remove(index);
+        self.save_settings(cx);
+        cx.notify();
     }
 
     fn begin_hotkey_capture(
@@ -2828,6 +2108,18 @@ impl AppWindow {
     }
 
     fn cancel_hotkey_capture(&mut self, cx: &mut Context<Self>) {
+        if let HotkeyCaptureState::Listening {
+            kind: HotkeyKind::DictationAlternative(index),
+            ..
+        } = self.hotkey_capture
+            && self
+                .settings
+                .dictation_hotkey_alternatives
+                .get(index)
+                .is_some_and(HotkeyBinding::is_empty)
+        {
+            self.settings.dictation_hotkey_alternatives.remove(index);
+        }
         if !matches!(self.hotkey_capture, HotkeyCaptureState::Idle) {
             crate::app_settings::set_hotkey_capture_active(false);
             self.hotkey_capture = HotkeyCaptureState::Idle;
@@ -2946,9 +2238,10 @@ impl AppWindow {
             .set_target(hotkey_saved_width(binding.keycaps().len()));
         match kind {
             HotkeyKind::Dictation => self.settings.dictation_hotkey = binding,
-            HotkeyKind::Edit => {
-                self.settings.edit_hotkey = binding;
-                self.voice_action_inputs.error = None;
+            HotkeyKind::DictationAlternative(index) => {
+                if let Some(slot) = self.settings.dictation_hotkey_alternatives.get_mut(index) {
+                    *slot = binding;
+                }
             }
             HotkeyKind::PasteLast => self.settings.paste_last_hotkey = Some(binding),
         }
@@ -3234,51 +2527,17 @@ impl AppWindow {
         }
         let dictation_notice =
             dictation_model_notice(self.setup_status, self.transcription_downloading.is_some());
-        let (title, description) = dictation_notice.or_else(|| {
-            self.settings
-                .commands_enabled
-                .then(|| command_model_notice(&self.command_model_status))
-                .flatten()
-        })?;
-        let action = if dictation_notice.is_some() {
-            compact_button("Choose model")
-                .id("choose-required-model")
-                .bg(rgb(ACCENT))
-                .text_color(rgb(TEXT))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transcription_picker_language =
-                        Some(this.settings.transcription.language.clone());
-                    cx.notify();
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .when(
-                    matches!(self.command_model_status, CommandModelStatus::Failed),
-                    |controls| {
-                        controls.child(compact_button("Retry").id("retry-command-model").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                if !this.preview {
-                                    cx.dispatch_action(&RetryCommands);
-                                }
-                            }),
-                        ))
-                    },
-                )
-                .child(
-                    compact_button("Turn off commands")
-                        .id("disable-unavailable-commands")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Err(error) = this.developer_set_commands_enabled(false, cx) {
-                                tracing::warn!(%error, "could not disable voice commands");
-                            }
-                        })),
-                )
-                .into_any_element()
-        };
+        let (title, description) = dictation_notice?;
+        let action = compact_button("Choose model")
+            .id("choose-required-model")
+            .bg(rgb(ACCENT))
+            .text_color(rgb(TEXT))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.transcription_picker_language =
+                    Some(this.settings.transcription.language.clone());
+                cx.notify();
+            }))
+            .into_any_element();
         Some(
             div()
                 .id("dictation-model-notice")
@@ -3332,6 +2591,7 @@ impl AppWindow {
     fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let permission_warnings = self.render_permission_warnings(cx);
         let hotkey_control = self.render_hotkey_setting_control(HotkeyKind::Dictation, window, cx);
+        let alternative_controls = self.render_dictation_hotkey_alternatives(window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
         let transcription_model = definition(self.settings.transcription.model);
         let transcription_label = format!(
@@ -3494,18 +2754,9 @@ impl AppWindow {
                             .bg(rgba(0x00000000))
                             .child(label)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if release && !this.settings.release_microphone_while_idle {
-                                    this.pending_microphone_policy =
-                                        Some(MicrophonePolicyChange::DisableCommandsAndRelease);
-                                    cx.notify();
-                                    return;
-                                }
-                                this.pending_microphone_policy = None;
                                 if this.settings.release_microphone_while_idle != release
-                                    && let Err(error) = this.update_microphone_policy(
-                                        MicrophonePolicyChange::SetReleaseWhileIdle(release),
-                                        cx,
-                                    )
+                                    && let Err(error) =
+                                        this.set_release_microphone_while_idle(release, cx)
                                 {
                                     tracing::error!(%error, "could not update microphone policy");
                                 }
@@ -3513,62 +2764,6 @@ impl AppWindow {
                             }))
                     }),
             );
-        let microphone_confirmation = (self.pending_microphone_policy
-            == Some(MicrophonePolicyChange::DisableCommandsAndRelease))
-        .then(|| {
-            div()
-                .px_4()
-                .py_3()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .border_b_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(CANVAS))
-                .child(settings_copy(
-                    "Release the microphone when idle?",
-                    "HEX will open the microphone when you press the shortcut. This adds a start-up delay and removes pre-roll, so the beginning of speech may be missed if you speak right away.",
-                ))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(MUTED))
-                        .child(if self.settings.commands_enabled {
-                            "Commands need an open microphone. Confirming will also turn Commands off. You can switch back to Keep ready at any time."
-                        } else {
-                            "Commands need an open microphone and will remain off. You can switch back to Keep ready at any time."
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            compact_button("Cancel")
-                                .id("cancel-release-microphone")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.pending_microphone_policy = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            compact_button("Release microphone")
-                                .id("confirm-release-microphone")
-                                .border_1()
-                                .border_color(rgb(LINE))
-                                .bg(rgb(SURFACE_SELECTED))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Err(error) = this.update_microphone_policy(
-                                        MicrophonePolicyChange::DisableCommandsAndRelease,
-                                        cx,
-                                    ) {
-                                        tracing::error!(%error, "could not update microphone policy");
-                                    }
-                                })),
-                        ),
-                )
-        });
         settings_pane(
             div()
                                     .children(permission_warnings)
@@ -3624,8 +2819,16 @@ impl AppWindow {
                                             "Hold to dictate, release to transcribe",
                                             hotkey_control,
                                         )
-                                        .border_b_0()
                                         .id("dictation-hotkey-setting"),
+                                    )
+                                    .child(
+                                        settings_row(
+                                            "Alternative shortcuts",
+                                            "Additional keys that start the same dictation",
+                                            alternative_controls,
+                                        )
+                                        .border_b_0()
+                                        .id("dictation-hotkey-alternatives-setting"),
                                     ),
                             )
                             .child(settings_section_label("BEHAVIOR"))
@@ -3658,7 +2861,7 @@ impl AppWindow {
                                                     .child(settings_copy(
                                                         "Microphone mode",
                                                         if self.settings.release_microphone_while_idle {
-                                                            "Opens on the shortcut, with a start-up delay and no pre-roll. Commands are off."
+                                                            "Opens on the shortcut, with a start-up delay and no pre-roll."
                                                         } else {
                                                             "Default: keeps the microphone open for the fastest start. A short pre-roll helps catch the beginning of speech. Audio is not saved by default."
                                                         },
@@ -3666,7 +2869,6 @@ impl AppWindow {
                                             )
                                             .child(microphone_mode),
                                     )
-                                    .children(microphone_confirmation)
                                     .child(
                                         settings_row(
                                             "Double-tap to lock",
@@ -3827,11 +3029,7 @@ impl AppWindow {
         if status.microphone != PermissionState::Ready {
             permission_rows.push(setup_row(
                 "Microphone",
-                if self.settings.commands_enabled {
-                    "Hear commands and dictation."
-                } else {
-                    "Record dictation while you hold the shortcut."
-                },
+                "Record dictation while you hold the shortcut.",
                 microphone,
             ));
         }
@@ -3861,11 +3059,7 @@ impl AppWindow {
                 .into_any_element();
             permission_rows.push(setup_row(
                 "Accessibility",
-                if self.settings.commands_enabled {
-                    "Paste text and run keyboard commands."
-                } else {
-                    "Paste completed dictation into the foreground app."
-                },
+                "Paste completed dictation into the foreground app.",
                 accessibility,
             ));
         }
@@ -3955,179 +3149,6 @@ impl AppWindow {
                                     models,
                                 )),
                             ),
-                    )
-                    .when(crate::DEVELOPER_FEATURES_ENABLED, |setup| {
-                        setup.child(
-                            div()
-                                .px_7()
-                                .py_5()
-                                .text_size(px(10.0))
-                                .line_height(px(16.0))
-                                .text_color(rgb(FAINT))
-                                .child("Meeting recording requests Screen & System Audio Recording separately when you use it."),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    fn render_voice_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let enabled = self.settings.voice_action.enabled;
-        let compact = window.viewport_size().width < px(980.0);
-        let (status, description) = voice_action_status_copy(enabled);
-        let position = self
-            .voice_action_inputs
-            .enabled_toggle
-            .render_position(window);
-        let enabled_control = div()
-            .id("voice-action-enabled")
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(MUTED))
-                    .child(status),
-            )
-            .child(toggle(position))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cancel_hotkey_capture(cx);
-                let enabled = !this.settings.voice_action.enabled;
-                let result = set_voice_action_enabled(&mut this.settings, enabled)
-                    .map_err(|message| color_eyre::eyre::eyre!(message))
-                    .and_then(|()| this.persist_settings());
-                match result {
-                    Ok(()) => {
-                        this.voice_action_inputs.enabled_toggle.set_enabled(enabled);
-                        this.voice_action_inputs.error = None;
-                    }
-                    Err(error) => {
-                        this.settings.voice_action.enabled = !enabled;
-                        this.voice_action_inputs.error = Some(error.to_string());
-                    }
-                }
-                cx.notify();
-            }));
-        let hotkey = self.render_hotkey_setting_control(HotkeyKind::Edit, window, cx);
-        let processing = if !enabled {
-            None
-        } else if let Some(copy) =
-            opencode_unavailable_copy(&self.model_catalog, OpenCodeFeature::VoiceAction)
-        {
-            let error = copy.error.map(str::to_owned);
-            let show_actions = copy.can_retry || copy.can_open_setup;
-            let retry_label = copy.retry_label;
-            let actions = div()
-                .mt_4()
-                .flex()
-                .gap_2()
-                .when(copy.can_retry, |actions| {
-                    actions.child(header_button(retry_label).id("retry-opencode").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.reload_model_catalog();
-                            cx.notify();
-                        }),
-                    ))
-                })
-                .when(copy.can_open_setup, |actions| {
-                    actions.child(
-                        header_button("Open OpenCode setup")
-                            .id("open-opencode-setup")
-                            .on_click(|_, _, _| open_opencode_beta_docs()),
-                    )
-                });
-            Some(
-                compact_panel()
-                    .p_5()
-                    .child(settings_copy(copy.title, copy.description))
-                    .when_some(error, |card, error| {
-                        card.child(
-                            div()
-                                .mt_3()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(0x613b3b))
-                                .bg(rgb(0x271b1b))
-                                .child(error_message("OpenCode reported:", error)),
-                        )
-                    })
-                    .when(show_actions, |card| card.child(actions))
-                    .into_any_element(),
-            )
-        } else {
-            Some(self.render_voice_action_processing(window, cx))
-        };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(pane_header("Voice Action"))
-            .child(
-                pane_body()
-                    .px(if compact { px(20.0) } else { px(32.0) })
-                    .py(px(22.0))
-                    .child(
-                        pane_content()
-                            .id("voice-action-scroll")
-                            .overflow_y_scroll()
-                            .gap(px(18.0))
-                            .child(
-                                div()
-                                    .px_1()
-                                    .pt_1()
-                                    .text_size(px(11.0))
-                                    .line_height(px(17.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(
-                                        "Voice Action is an optional OpenCode feature, separate \
-                                         from dictation. Speak an instruction, optionally with \
-                                         text selected, and HEX pastes the model's reply at your \
-                                         cursor. The default shortcut is Command-Option. Changing \
-                                         your dictation shortcut does not change this shortcut.",
-                                    ),
-                            )
-                            .child(compact_panel().child(voice_action_setting_row(
-                                "Enable Voice Action",
-                                description,
-                                enabled_control,
-                                false,
-                                compact,
-                            )))
-                            .when_some(self.voice_action_inputs.error.clone(), |column, error| {
-                                column.child(error_message("Could not update Voice Action:", error))
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(compact_section_label("CAPTURE"))
-                                    .child(
-                                        compact_panel().child(
-                                            voice_action_setting_row(
-                                                "Shortcut",
-                                                if enabled {
-                                                    "Hold to speak; selected text is included automatically."
-                                                } else {
-                                                    "Saved for when Voice Action is enabled."
-                                                },
-                                                hotkey,
-                                                false,
-                                                compact,
-                                            )
-                                            .id("voice-action-hotkey-setting"),
-                                        ),
-                                    ),
-                            )
-                            .when_some(processing, |column, processing| column.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(compact_section_label("PROCESSING"))
-                                    .child(processing),
-                            )),
                     ),
             )
             .into_any_element()
@@ -4194,18 +3215,6 @@ impl AppWindow {
         }
     }
 
-    fn voice_action_inputs(settings: &AppSettings, cx: &mut Context<Self>) -> VoiceActionInputs {
-        let model = Self::voice_action_model_input(
-            settings.voice_action.model.as_deref().unwrap_or_default(),
-            cx,
-        );
-        VoiceActionInputs {
-            model,
-            enabled_toggle: ToggleSpring::new(settings.voice_action.enabled),
-            error: None,
-        }
-    }
-
     fn synchronized_processing_input(
         entity: Entity<TextInput>,
         cx: &mut Context<Self>,
@@ -4216,68 +3225,6 @@ impl AppWindow {
         ProcessingInput {
             entity,
             _subscriptions: vec![subscription],
-        }
-    }
-
-    fn model_input(initial: &str, cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search available models", initial));
-        let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
-            this.model_picker_highlight = 0;
-            cx.notify();
-        });
-        let navigate = cx.subscribe(&entity, |this, _, event: &TextNavigate, cx| {
-            let count = this
-                .model_choice_keys(ModelPickerTarget::Mode(this.selected_mode), cx)
-                .len();
-            if count > 0 {
-                this.model_picker_highlight =
-                    advance_highlight(this.model_picker_highlight, event.0, count);
-                cx.notify();
-            }
-        });
-        let submitted = cx.subscribe(&entity, |this, _, _: &TextSubmitted, cx| {
-            if let Some(model) = this
-                .model_choice_keys(ModelPickerTarget::Mode(this.selected_mode), cx)
-                .get(this.model_picker_highlight)
-                .cloned()
-            {
-                this.select_model(ModelPickerTarget::Mode(this.selected_mode), model, cx);
-            }
-        });
-        ProcessingInput {
-            entity,
-            _subscriptions: vec![changed, navigate, submitted],
-        }
-    }
-
-    fn voice_action_model_input(initial: &str, cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search available models", initial));
-        let changed = cx.subscribe(&entity, |this, _, _: &TextChanged, cx| {
-            this.model_picker_highlight = 0;
-            cx.notify();
-        });
-        let navigate = cx.subscribe(&entity, |this, _, event: &TextNavigate, cx| {
-            let count = this
-                .model_choice_keys(ModelPickerTarget::VoiceAction, cx)
-                .len();
-            if count > 0 {
-                this.model_picker_highlight =
-                    advance_highlight(this.model_picker_highlight, event.0, count);
-                cx.notify();
-            }
-        });
-        let submitted = cx.subscribe(&entity, |this, _, _: &TextSubmitted, cx| {
-            if let Some(model) = this
-                .model_choice_keys(ModelPickerTarget::VoiceAction, cx)
-                .get(this.model_picker_highlight)
-                .cloned()
-            {
-                this.select_model(ModelPickerTarget::VoiceAction, model, cx);
-            }
-        });
-        ProcessingInput {
-            entity,
-            _subscriptions: vec![changed, navigate, submitted],
         }
     }
 
@@ -4318,24 +3265,7 @@ impl AppWindow {
         }
     }
 
-    fn multiline_processing_input(
-        placeholder: &'static str,
-        initial: &str,
-        cx: &mut Context<Self>,
-    ) -> ProcessingInput {
-        let entity = cx.new(|cx| {
-            TextInput::multiline_with_height(
-                cx,
-                placeholder,
-                initial,
-                px(COMPACT_MULTILINE_INPUT_HEIGHT),
-            )
-        });
-        Self::synchronized_processing_input(entity, cx)
-    }
-
     fn mode_inputs(mode: &DictationMode, cx: &mut Context<Self>) -> ModeInputs {
-        let processing = &mode.post_processing;
         ModeInputs {
             name: Self::processing_input("Mode name", &mode.name, cx),
             browser_hosts: Self::processing_input(
@@ -4343,14 +3273,6 @@ impl AppWindow {
                 &mode.browser_hosts.join(", "),
                 cx,
             ),
-            prompt: Self::multiline_processing_input(
-                "Describe how OpenCode should rewrite your dictation...",
-                &processing.prompt,
-                cx,
-            ),
-            model: Self::model_input(processing.model.as_deref().unwrap_or_default(), cx),
-            deadline: Self::processing_input("30", &processing.deadline_seconds.to_string(), cx),
-            processing_toggle: ToggleSpring::new(processing.enabled),
             replacements: mode
                 .replacements
                 .iter()
@@ -4477,7 +3399,7 @@ impl AppWindow {
                 })
                 .collect::<Vec<_>>(),
         );
-        let detail = self.render_mode_detail(window, cx);
+        let detail = self.render_mode_detail(cx);
         div()
             .size_full()
             .flex()
@@ -4554,37 +3476,17 @@ impl AppWindow {
         )
     }
 
-    fn render_mode_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_mode_detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let selection = self.selected_mode;
         let is_default = selection == ModeSelection::Default;
-        let (name, browser_hosts, prompt, model, deadline, processing_position) = {
+        let (name, browser_hosts) = {
             let inputs = self.selected_mode_inputs_mut();
             (
                 inputs.name.entity.clone(),
                 inputs.browser_hosts.entity.clone(),
-                inputs.prompt.entity.clone(),
-                inputs.model.entity.clone(),
-                inputs.deadline.entity.clone(),
-                inputs.processing_toggle.render_position(window),
             )
         };
-        let processing_enabled = self.selected_mode_settings().post_processing.enabled;
-        let processing_can_toggle = processing_enabled || self.opencode_available();
-        let processing_unavailable =
-            opencode_unavailable_copy(&self.model_catalog, OpenCodeFeature::Transformation).map(
-                |copy| {
-                    (
-                        copy.title,
-                        copy.description,
-                        copy.error.map(str::to_owned),
-                        copy.can_retry,
-                        copy.retry_label,
-                        copy.can_open_setup,
-                    )
-                },
-            );
         let corrections = self.render_mode_replacements(selection, cx);
-        let transformations = self.render_mode_transformations(selection, cx);
         let application_picker =
             (!is_default).then(|| self.render_application_picker(selection, cx));
         let basics = if is_default {
@@ -4645,106 +3547,6 @@ impl AppWindow {
                 )
                 .into_any_element()
         };
-
-        let processing_toggle = div()
-            .id("mode-processing-toggle")
-            .h(px(28.0))
-            .flex()
-            .items_center()
-            .child(toggle(processing_position))
-            .when(!processing_can_toggle, |control| control.opacity(0.42))
-            .when(processing_can_toggle, |control| {
-                control.on_click(cx.listener(move |this, _, _, cx| {
-                    let enabled = !this.selected_mode_settings().post_processing.enabled;
-                    this.selected_mode_inputs_mut()
-                        .processing_toggle
-                        .set_enabled(enabled);
-                    this.selected_mode_settings_mut().post_processing.enabled = enabled;
-                    this.save_settings(cx);
-                }))
-            })
-            .into_any_element();
-        let processing_settings = processing_enabled.then(|| {
-            self.render_processing_settings(
-                ModelPickerTarget::Mode(selection),
-                Some(prompt),
-                model,
-                deadline,
-                window,
-                cx,
-            )
-        });
-        let processing_unavailable = processing_unavailable.map(
-            |(title, description, error, can_retry, retry_label, can_open_setup)| {
-                let actions = div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .when(can_retry, |actions| {
-                        actions.child(
-                            header_button(retry_label)
-                                .id("retry-mode-opencode")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.reload_model_catalog();
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .when(can_open_setup, |actions| {
-                        actions.child(
-                            header_button("Open setup")
-                                .id("open-mode-opencode-setup")
-                                .on_click(|_, _, _| open_opencode_beta_docs()),
-                        )
-                    });
-                div()
-                    .px_3()
-                    .py_3()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_4()
-                    .border_t_1()
-                    .border_color(rgb(LINE))
-                    .child(
-                        div()
-                            .min_w(px(0.0))
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT_SOFT))
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .line_height(px(16.0))
-                                    .text_color(rgb(if error.is_some() { NEGATIVE } else { FAINT }))
-                                    .child(error.unwrap_or_else(|| description.into())),
-                            ),
-                    )
-                    .when(can_retry || can_open_setup, |notice| notice.child(actions))
-            },
-        );
-        let processing = compact_panel()
-            .child(
-                compact_panel_header("OpenCode transformation", Some(processing_toggle)).when(
-                    !processing_enabled && processing_unavailable.is_none(),
-                    |header| header.border_b_0(),
-                ),
-            )
-            .when_some(processing_settings, |panel, settings| {
-                panel.child(div().px_3().pb_3().child(settings))
-            })
-            .when_some(processing_unavailable, |panel, unavailable| {
-                panel.child(unavailable)
-            })
-            .into_any_element();
 
         let remove = (!is_default).then(|| {
             let action =
@@ -4828,210 +3630,10 @@ impl AppWindow {
                     .child(div().h(px(4.0)))
                     .child(compact_section_label("TEXT PROCESSING"))
                     .child(corrections)
-                    .child(processing)
-                    .child(transformations)
                     .when_some(remove, |detail, remove| {
                         detail.child(div().pt_1().child(remove))
                     }),
             )
-            .into_any_element()
-    }
-
-    fn render_mode_transformations(
-        &self,
-        selection: ModeSelection,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = self.mode_settings(selection).transformations.clone();
-        let catalog = &self.personal_commands_status.transformations;
-        let selected_rows = selected
-            .iter()
-            .enumerate()
-            .map(|(target_index, id)| {
-                let name = catalog
-                    .iter()
-                    .find(|transformation| &transformation.id == id)
-                    .map_or_else(|| id.clone(), |transformation| transformation.name.clone());
-                let drag = TransformationDrag {
-                    selection,
-                    id: id.clone(),
-                    name: name.clone(),
-                    position: Point::default(),
-                };
-                let dragged_id = id.clone();
-                let drop_id = id.clone();
-                div()
-                    .id(("mode-transformation", target_index))
-                    .h(px(36.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .when(target_index + 1 < selected.len(), |row| {
-                        row.border_b_1().border_color(rgb(LINE))
-                    })
-                    .can_drop(move |value, _, _| {
-                        value
-                            .downcast_ref::<TransformationDrag>()
-                            .is_some_and(|drag| drag.selection == selection && drag.id != drop_id)
-                    })
-                    .on_drop(cx.listener(move |this, drag: &TransformationDrag, _, cx| {
-                        if drag.selection != selection {
-                            return;
-                        }
-                        let transformations =
-                            &mut this.mode_settings_mut(selection).transformations;
-                        if !reorder_transformation(transformations, &drag.id, target_index) {
-                            return;
-                        }
-                        this.save_settings(cx);
-                    }))
-                    .child(
-                        div()
-                            .id(("drag-mode-transformation", target_index))
-                            .w(px(20.0))
-                            .h_full()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(12.0))
-                            .text_color(rgb(FAINT))
-                            .child("⠿")
-                            .on_drag(drag, |drag, position, _, cx| {
-                                cx.new(|_| drag.clone().at(position))
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .text_size(px(11.0))
-                            .text_color(rgb(TEXT_SOFT))
-                            .truncate()
-                            .child(name),
-                    )
-                    .child(
-                        compact_button("×")
-                            .id(("remove-mode-transformation", target_index))
-                            .size(px(28.0))
-                            .px_0()
-                            .justify_center()
-                            .text_size(px(14.0))
-                            .text_color(rgb(MUTED))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mode_settings_mut(selection)
-                                    .transformations
-                                    .retain(|candidate| candidate != &dragged_id);
-                                this.save_settings(cx);
-                            })),
-                    )
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
-
-        let available_rows = if self.transformation_picker_open {
-            catalog
-                .iter()
-                .enumerate()
-                .filter(|(_, transformation)| !selected.contains(&transformation.id))
-                .map(|(index, transformation)| {
-                    let id = transformation.id.clone();
-                    let name = transformation.name.clone();
-                    let description = transformation.description.clone();
-                    div()
-                        .id(("available-mode-transformation", index))
-                        .min_h(px(40.0))
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .border_t_1()
-                        .border_color(rgb(LINE))
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(TEXT_SOFT))
-                                        .child(name),
-                                )
-                                .when_some(description, |copy, description| {
-                                    copy.child(
-                                        div()
-                                            .pt_1()
-                                            .text_size(px(10.0))
-                                            .text_color(rgb(FAINT))
-                                            .child(description),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(TEXT_SOFT))
-                                .child("Add"),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.mode_settings_mut(selection)
-                                .transformations
-                                .push(id.clone());
-                            this.save_settings(cx);
-                        }))
-                        .into_any_element()
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let available_empty = available_rows.is_empty();
-        let catalog_empty = catalog.is_empty();
-        let add = (!catalog_empty).then(|| {
-            let button = if self.transformation_picker_open {
-                compact_button("Done")
-                    .h(px(28.0))
-                    .mr(px(-7.0))
-                    .text_size(px(10.0))
-            } else {
-                compact_header_plus_button()
-            };
-            button
-                .id("toggle-transformation-picker")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transformation_picker_open = !this.transformation_picker_open;
-                    cx.notify();
-                }))
-                .into_any_element()
-        });
-
-        compact_panel()
-            .child(compact_panel_header("Transformations", add).when(
-                selected.is_empty() && !self.transformation_picker_open,
-                |header| header.border_b_0(),
-            ))
-            .children(selected_rows)
-            .when(self.transformation_picker_open && !catalog_empty, |panel| {
-                panel
-                    .when(available_empty, |list| {
-                        list.child(
-                            div()
-                                .border_t_1()
-                                .border_color(rgb(LINE))
-                                .px_3()
-                                .py_3()
-                                .text_size(px(10.0))
-                                .text_color(rgb(MUTED))
-                                .child("Every registered transformation is already included."),
-                        )
-                    })
-                    .children(available_rows)
-            })
             .into_any_element()
     }
 
@@ -5446,450 +4048,6 @@ impl AppWindow {
         .detach();
     }
 
-    /// Build the shared OpenCode model picker: the collapsed selected-model
-    /// card, the type-to-filter search input with bounded suggestions, the
-    /// catalog status line, and the thinking-variant control. Every surface
-    /// that selects a model renders these same parts.
-    fn processing_picker(
-        &mut self,
-        target: ModelPickerTarget,
-        model: Entity<TextInput>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> ProcessingPicker {
-        let focused = model.read(cx).is_focused(window);
-        let (selected_model, selected_variant) = self.model_settings_for(target);
-        let selected_model_text = selected_model.unwrap_or_default();
-        if !focused && model.read(cx).text() != selected_model_text {
-            model.update(cx, |input, cx| input.set_text(selected_model_text, cx));
-        }
-        let query = model.read(cx).text().trim().to_lowercase();
-        let presentation = model_presentation(&self.model_catalog, selected_model);
-        let (catalog_status, default_label, matches, variants) = match &self.model_catalog {
-            ModelCatalogState::Loading => {
-                ("Loading OpenCode...".into(), None, Vec::new(), Vec::new())
-            }
-            ModelCatalogState::Missing => (
-                "OpenCode beta required".into(),
-                None,
-                Vec::new(),
-                Vec::new(),
-            ),
-            ModelCatalogState::Failed(error) => (
-                format!("OpenCode models unavailable: {error}"),
-                None,
-                Vec::new(),
-                Vec::new(),
-            ),
-            ModelCatalogState::Loaded(catalog) => {
-                let choice_keys = if focused {
-                    filtered_model_keys(catalog, &query)
-                } else {
-                    Vec::new()
-                };
-                let matches = choice_keys
-                    .iter()
-                    .filter_map(Option::as_deref)
-                    .filter_map(|key| catalog.models.iter().find(|choice| choice.key == key))
-                    .cloned()
-                    .collect();
-                let variants = model_variants(catalog, selected_model);
-                let default_label = choice_keys
-                    .first()
-                    .is_some_and(Option::is_none)
-                    .then(|| {
-                        catalog
-                            .default_name
-                            .as_ref()
-                            .map(|name| match &catalog.default_key {
-                                Some(key) => format!("OpenCode default: {name} ({key})"),
-                                None => format!("OpenCode default: {name}"),
-                            })
-                    })
-                    .flatten();
-                (
-                    format!("{} available models", catalog.models.len()),
-                    default_label,
-                    matches,
-                    variants,
-                )
-            }
-        };
-        let suggestions =
-            (focused && (!matches.is_empty() || default_label.is_some())).then(|| {
-                div()
-                    .mt_1()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(SURFACE))
-                    .when_some(default_label.clone(), |list, label| {
-                        list.child(
-                            model_choice_row(
-                                "Use OpenCode default",
-                                label,
-                                self.model_picker_highlight == 0,
-                            )
-                            .id("opencode-default")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.select_model(target, None, cx);
-                                    window.blur();
-                                }),
-                            ),
-                        )
-                    })
-                    .children(matches.into_iter().enumerate().map(|(index, choice)| {
-                        let key = choice.key.clone();
-                        let row_index = index + usize::from(default_label.is_some());
-                        model_choice_row(
-                            choice.name,
-                            choice.key,
-                            self.model_picker_highlight == row_index,
-                        )
-                        .id(("model-choice", index))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                this.select_model(target, Some(key.clone()), cx);
-                                window.blur();
-                            }),
-                        )
-                    }))
-            });
-        let has_variants = !variants.is_empty();
-        let variant_open = self.variant_picker_open == Some(target);
-        let variant_list = (has_variants && variant_open).then(|| {
-            let choices = std::iter::once(None)
-                .chain(variants.iter().cloned().map(Some))
-                .collect::<Vec<_>>();
-            div()
-                .mt_1()
-                .p_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(LINE))
-                .bg(rgb(SURFACE))
-                .children(choices.into_iter().enumerate().map(|(index, variant)| {
-                    let selected = selected_variant == variant.as_deref();
-                    let label = variant.clone().unwrap_or_else(|| "Default".into());
-                    div()
-                        .id(("model-variant", index))
-                        .w_full()
-                        .h(px(28.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .rounded_sm()
-                        .text_size(px(11.0))
-                        .text_color(if selected { rgb(TEXT) } else { rgb(TEXT_SOFT) })
-                        .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-                        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.variant_picker_open = None;
-                            this.set_model_variant(target, variant.clone(), cx);
-                        }))
-                }))
-        });
-        let variant_control = div()
-            .w(px(160.0))
-            .flex_none()
-            .child(
-                disclosure_button(selected_variant.unwrap_or("Default").to_string())
-                    .id("model-variant-trigger")
-                    .w(px(160.0))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.variant_picker_open = if this.variant_picker_open == Some(target) {
-                            None
-                        } else {
-                            Some(target)
-                        };
-                        cx.notify();
-                    })),
-            )
-            .when_some(variant_list, |control, list| control.child(list));
-        let model_control = if let Some(presentation) = presentation.filter(|_| !focused) {
-            let model_input = model.clone();
-            {
-                div()
-                    .id("selected-model")
-                    .h(px(54.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(SURFACE))
-                    .hover(|control| control.bg(rgb(SURFACE_HOVER)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT))
-                                    .child(presentation.name),
-                            )
-                            .child(div().text_size(px(10.0)).text_color(rgb(FAINT)).child(
-                                format!("{} · {}", presentation.provider, presentation.key),
-                            )),
-                    )
-                    .when(presentation.is_default, |control| {
-                        control.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(9.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(MUTED))
-                                .child("DEFAULT"),
-                        )
-                    })
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        model_input.focus_handle(cx).focus(window);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }
-        } else {
-            model.clone().into_any_element()
-        };
-        let refresh_control =
-            matches!(&self.model_catalog, ModelCatalogState::Loaded(_)).then(|| {
-                compact_button("Refresh")
-                    .id("refresh-opencode-models")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.reload_model_catalog();
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            });
-        ProcessingPicker {
-            catalog_status,
-            model_control,
-            refresh_control,
-            suggestions,
-            has_variants,
-            variant_control,
-        }
-    }
-
-    /// The Voice Action processing panel: the shared model and thinking
-    /// pickers presented in the pane's setting-row language. The processing
-    /// deadline is not configurable here; Voice Action uses the persisted
-    /// default.
-    fn render_voice_action_processing(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let compact = window.viewport_size().width < px(980.0);
-        let model = self.voice_action_inputs.model.entity.clone();
-        let ProcessingPicker {
-            catalog_status,
-            model_control,
-            refresh_control,
-            suggestions,
-            has_variants,
-            variant_control,
-        } = self.processing_picker(ModelPickerTarget::VoiceAction, model, window, cx);
-        let model_field = div()
-            .when(!compact, |field| field.w(px(380.0)).flex_none())
-            .when(compact, |field| field.w_full())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().min_w(px(0.0)).flex_1().child(model_control))
-                    .when_some(refresh_control, |row, refresh| row.child(refresh)),
-            )
-            .when_some(suggestions, |field, suggestions| field.child(suggestions));
-        compact_panel()
-            .child(voice_action_setting_row(
-                "OpenCode model",
-                catalog_status,
-                model_field,
-                has_variants,
-                compact,
-            ))
-            .when(has_variants, |panel| {
-                panel.child(voice_action_setting_row(
-                    "Thinking",
-                    "Choose how much reasoning the model should use",
-                    div().w(px(160.0)).flex_none().child(variant_control),
-                    false,
-                    compact,
-                ))
-            })
-            .into_any_element()
-    }
-
-    fn render_processing_settings(
-        &mut self,
-        target: ModelPickerTarget,
-        prompt: Option<Entity<TextInput>>,
-        model: Entity<TextInput>,
-        deadline: Entity<TextInput>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let compact = window.viewport_size().width < px(980.0);
-        let ProcessingPicker {
-            catalog_status,
-            model_control,
-            refresh_control,
-            suggestions,
-            has_variants,
-            variant_control,
-        } = self.processing_picker(target, model, window, cx);
-        div()
-            .pt_5()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(
-                div()
-                    .flex()
-                    .when(compact, |fields| fields.flex_col())
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(settings_control(
-                                "Model",
-                                &catalog_status,
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().min_w(px(0.0)).flex_1().child(model_control))
-                                    .when_some(refresh_control, |row, refresh| row.child(refresh))
-                                    .into_any_element(),
-                            ))
-                            .when(
-                                matches!(&self.model_catalog, ModelCatalogState::Missing),
-                                |field| {
-                                    field.child(
-                                        compact_button("Install OpenCode")
-                                            .id("install-opencode-beta")
-                                            .on_click(|_, _, _| open_opencode_beta_docs()),
-                                    )
-                                },
-                            )
-                            .when_some(suggestions, |field, suggestions| field.child(suggestions)),
-                    )
-                    .child(
-                        div()
-                            .when(!compact, |field| field.w(px(150.0)).flex_none())
-                            .when(compact, |field| field.w_full())
-                            .child(settings_input("Deadline", "Seconds", deadline)),
-                    ),
-            )
-            .when(has_variants, |processing| {
-                processing.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT_SOFT))
-                                .child("Thinking"),
-                        )
-                        .child(div().flex().child(variant_control)),
-                )
-            })
-            .when_some(prompt, |processing, prompt| {
-                processing.child(settings_input(
-                    "Instructions",
-                    "Tell OpenCode exactly how to transform the dictated text.",
-                    prompt,
-                ))
-            })
-            .into_any_element()
-    }
-
-    fn model_choice_keys(&self, target: ModelPickerTarget, cx: &App) -> Vec<Option<String>> {
-        let ModelCatalogState::Loaded(catalog) = &self.model_catalog else {
-            return Vec::new();
-        };
-        let query = self
-            .model_input_for(target)
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        filtered_model_keys(catalog, &query)
-    }
-
-    fn select_model(
-        &mut self,
-        target: ModelPickerTarget,
-        model: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let text = model.clone().unwrap_or_default();
-        self.model_input_for(target)
-            .update(cx, |input, cx| input.set_text(text, cx));
-        match target {
-            ModelPickerTarget::Mode(selection) => {
-                let processing = &mut self.mode_settings_mut(selection).post_processing;
-                processing.model = model;
-                processing.variant = None;
-            }
-            ModelPickerTarget::VoiceAction => {
-                self.settings.voice_action.model = model;
-                self.settings.voice_action.variant = None;
-            }
-        }
-        self.save_settings(cx);
-    }
-
-    fn set_model_variant(
-        &mut self,
-        target: ModelPickerTarget,
-        variant: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        apply_model_variant(&mut self.settings, target, variant, &self.model_catalog);
-        self.save_settings(cx);
-    }
-
-    fn model_input_for(&self, target: ModelPickerTarget) -> Entity<TextInput> {
-        match target {
-            ModelPickerTarget::Mode(selection) => {
-                self.mode_inputs_for(selection).model.entity.clone()
-            }
-            ModelPickerTarget::VoiceAction => self.voice_action_inputs.model.entity.clone(),
-        }
-    }
-
-    fn model_settings_for(&self, target: ModelPickerTarget) -> (Option<&str>, Option<&str>) {
-        match target {
-            ModelPickerTarget::Mode(selection) => {
-                let processing = &self.mode_settings(selection).post_processing;
-                (processing.model.as_deref(), processing.variant.as_deref())
-            }
-            ModelPickerTarget::VoiceAction => (
-                self.settings.voice_action.model.as_deref(),
-                self.settings.voice_action.variant.as_deref(),
-            ),
-        }
-    }
-
     fn selected_mode_inputs_mut(&mut self) -> &mut ModeInputs {
         self.mode_inputs_mut(self.selected_mode)
     }
@@ -5903,10 +4061,7 @@ impl AppWindow {
         self.selected_mode = selection;
         self.application_picker_open = false;
         self.application_picker_error = None;
-        self.transformation_picker_open = false;
-        self.variant_picker_open = None;
         self.application_picker_highlight = 0;
-        self.model_picker_highlight = 0;
         self.mode_delete_armed = false;
         self.mode_context_menu = None;
         self.application_search
@@ -5930,14 +4085,6 @@ impl AppWindow {
         }
     }
 
-    fn selected_mode_settings(&self) -> &DictationMode {
-        self.mode_settings(self.selected_mode)
-    }
-
-    fn selected_mode_settings_mut(&mut self) -> &mut DictationMode {
-        self.mode_settings_mut(self.selected_mode)
-    }
-
     fn mode_settings(&self, selection: ModeSelection) -> &DictationMode {
         match selection {
             ModeSelection::Default => &self.settings.dictation_processing.default_mode,
@@ -5949,783 +4096,6 @@ impl AppWindow {
         match selection {
             ModeSelection::Default => &mut self.settings.dictation_processing.default_mode,
             ModeSelection::Custom(index) => &mut self.settings.dictation_processing.modes[index],
-        }
-    }
-
-    fn render_meetings(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let action = if self.meeting_stop_pending {
-            meeting_progress_action("Finalizing...")
-        } else {
-            match meeting::active(&self.meetings).map(|meeting| meeting.status) {
-                Some(MeetingStatus::Starting) => meeting_progress_action("Starting..."),
-                Some(MeetingStatus::Recording) => div()
-                    .id("stop-meeting")
-                    .h(px(30.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded_sm()
-                    .bg(rgb(0xe8e8e8))
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x171717))
-                    .hover(|button| button.bg(rgb(0xffffff)))
-                    .child("Stop & Transcribe")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.meeting_stop_pending = true;
-                        if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Stop) {
-                            this.meeting_stop_pending = false;
-                            log_meeting_request_error(error);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                Some(MeetingStatus::Transcribing) => meeting_progress_action("Finalizing..."),
-                _ if self.meeting_refresh_started_ms.is_some() => {
-                    meeting_progress_action("Starting...")
-                }
-                _ => div()
-                    .id("start-meeting")
-                    .h(px(30.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded_sm()
-                    .bg(rgb(0xe8e8e8))
-                    .text_size(px(12.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0x171717))
-                    .hover(|button| button.bg(rgb(0xffffff)))
-                    .child("Start Recording")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.meeting_refresh_started_ms = Some(now_ms());
-                        if let Err(error) = this.meeting_requests.try_send(MeetingRequest::Start) {
-                            this.meeting_refresh_started_ms = None;
-                            log_meeting_request_error(error);
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            }
-        };
-
-        let rows: Vec<AnyElement> = self
-            .meetings
-            .iter()
-            .enumerate()
-            .map(|(index, meeting)| {
-                let id = meeting.id.clone();
-                let selected = self.selected_meeting.as_deref() == Some(id.as_str());
-                let title = meeting.title.clone();
-                let duration = meeting::format_duration(meeting_duration(meeting));
-                let status = meeting_status(meeting.status);
-                div()
-                    .id(("meeting", index))
-                    .w_full()
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(rgb(LINE))
-                    .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-                    .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .text_size(px(11.0))
-                            .text_color(rgb(FAINT))
-                            .child(status)
-                            .child(duration),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_meeting = Some(id.clone());
-                        this.load_selected_meeting();
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-
-        let list = div()
-            .id("meetings-list")
-            .w(px(PANE_LIST_WIDTH))
-            .h_full()
-            .flex_none()
-            .overflow_y_scroll()
-            .border_r_1()
-            .border_color(rgb(LINE))
-            .when(
-                self.meetings.is_empty() && self.meetings_error.is_none(),
-                |list| list.child(empty_message("No meetings yet.")),
-            )
-            .when_some(self.meetings_error.clone(), |list, error| {
-                list.child(error_message("Meetings could not be loaded.", error))
-            })
-            .children(rows);
-
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(pane_header_with_action("Meetings", Some(action)))
-            .when_some(self.meeting_runtime_error.clone(), |pane, error| {
-                pane.child(
-                    div()
-                        .px_6()
-                        .py_3()
-                        .border_b_1()
-                        .border_color(rgb(LINE))
-                        .text_size(px(12.0))
-                        .text_color(rgb(NEGATIVE))
-                        .child(error),
-                )
-            })
-            .child(
-                pane_body().child(
-                    pane_content()
-                        .id("meetings-workspace")
-                        .flex_row()
-                        .child(list)
-                        .child(self.render_meeting_detail(cx)),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_meeting_detail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(meeting) = self
-            .selected_meeting
-            .as_deref()
-            .and_then(|id| self.meetings.iter().find(|meeting| meeting.id == id))
-            .cloned()
-        else {
-            return detail_placeholder("Select a meeting.");
-        };
-        let id = meeting.id.clone();
-        let reveal = div()
-            .id("reveal-meeting-files")
-            .h(px(30.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .rounded_sm()
-            .text_size(px(12.0))
-            .text_color(rgb(MUTED))
-            .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT_SOFT)))
-            .child("Reveal Files")
-            .on_click(cx.listener(move |_, _, _, _| {
-                match meeting::root() {
-                    Ok(root) => {
-                        match ProcessCommand::new("/usr/bin/open")
-                            .arg(root.join(&id))
-                            .status()
-                        {
-                            Ok(status) if status.success() => {}
-                            Ok(status) => {
-                                tracing::error!(%status, "could not reveal meeting files")
-                            }
-                            Err(error) => {
-                                tracing::error!(%error, "could not reveal meeting files")
-                            }
-                        }
-                    }
-                    Err(error) => tracing::error!(%error, "could not locate meeting files"),
-                }
-            }));
-
-        let transcript = match &self.meeting_transcript {
-            MeetingTranscript::Empty => empty_message("No transcript selected."),
-            MeetingTranscript::Loaded(lines) if lines.is_empty() => {
-                empty_message(match meeting.status {
-                    MeetingStatus::Starting => "Preparing local audio capture...",
-                    MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
-                        "Live transcription is unavailable. Audio is still recording safely."
-                    }
-                    MeetingStatus::Recording if self.meeting_stop_pending => {
-                        "Building the final transcript..."
-                    }
-                    MeetingStatus::Recording => "Listening for speech...",
-                    MeetingStatus::Transcribing => {
-                        "The live draft is empty. Building the final transcript..."
-                    }
-                    MeetingStatus::Complete => "The final transcript is empty.",
-                    MeetingStatus::Interrupted | MeetingStatus::Failed => {
-                        "No recoverable transcript is available."
-                    }
-                })
-            }
-            MeetingTranscript::Loaded(lines) => div()
-                .children(lines.iter().enumerate().map(|(index, line)| {
-                    div()
-                        .id(("transcript-line", index))
-                        .flex()
-                        .flex_col()
-                        .when_some(line.pause_before_ms, |row, pause| {
-                            row.child(
-                                div()
-                                    .py_3()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(FAINT))
-                                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE)))
-                                    .child(format!("{} pause", meeting::format_duration(pause)))
-                                    .child(div().h(px(1.0)).flex_1().bg(rgb(LINE))),
-                            )
-                        })
-                        .child(
-                            div()
-                                .py_4()
-                                .flex()
-                                .items_start()
-                                .gap_4()
-                                .border_b_1()
-                                .border_color(rgb(LINE))
-                                .child(
-                                    div()
-                                        .w(px(116.0))
-                                        .flex_none()
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(MUTED))
-                                        .child(line.source.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(13.0))
-                                        .line_height(px(20.0))
-                                        .text_color(rgb(TEXT_SOFT))
-                                        .child(line.text.clone()),
-                                ),
-                        )
-                }))
-                .into_any_element(),
-            MeetingTranscript::Unavailable(error) => {
-                error_message("Transcript unavailable.", error.clone())
-            }
-        };
-        let transcript_state = match meeting.status {
-            MeetingStatus::Starting => "STARTING CAPTURE",
-            MeetingStatus::Recording if meeting.live_transcription_error.is_some() => {
-                "LIVE DRAFT UNAVAILABLE"
-            }
-            MeetingStatus::Recording if self.meeting_stop_pending => "FINALIZING WITH PARAKEET V2",
-            MeetingStatus::Recording => "LIVE DRAFT",
-            MeetingStatus::Transcribing => "FINALIZING WITH PARAKEET V2",
-            MeetingStatus::Complete => "FINAL TRANSCRIPT",
-            MeetingStatus::Interrupted | MeetingStatus::Failed => "RECOVERED DRAFT",
-        };
-
-        div()
-            .flex_1()
-            .min_w(px(0.0))
-            .h_full()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_6()
-                    .py_5()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(LINE))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(20.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(meeting.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap_4()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(MUTED))
-                                    .child(
-                                        if self.meeting_stop_pending
-                                            && meeting.status == MeetingStatus::Recording
-                                        {
-                                            "Finalizing"
-                                        } else {
-                                            meeting_status(meeting.status)
-                                        },
-                                    )
-                                    .child(meeting::format_duration(meeting_duration(&meeting))),
-                            )
-                            .when_some(meeting.error.clone(), |header, error| {
-                                header.child(
-                                    div()
-                                        .max_w(px(620.0))
-                                        .text_size(px(11.0))
-                                        .line_height(px(17.0))
-                                        .text_color(rgb(NEGATIVE))
-                                        .child(error),
-                                )
-                            }),
-                    )
-                    .child(reveal),
-            )
-            .child(
-                div()
-                    .id("meeting-transcript")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.meeting_transcript_scroll)
-                    .px_6()
-                    .pb_6()
-                    .child(
-                        div()
-                            .h(px(42.0))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(10.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(MUTED))
-                            .when(
-                                meeting.status == MeetingStatus::Recording
-                                    && !self.meeting_stop_pending,
-                                |label| {
-                                    label
-                                        .child(div().size(px(6.0)).rounded_full().bg(rgb(0xd64f4f)))
-                                },
-                            )
-                            .child(transcript_state)
-                            .when_some(meeting.live_transcription_error.clone(), |label, error| {
-                                label.child(
-                                    div().text_color(rgb(NEGATIVE)).child(format!("  {error}")),
-                                )
-                            }),
-                    )
-                    .child(transcript),
-            )
-            .into_any_element()
-    }
-
-    fn render_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let config_path = self.personal_workspace.join("hex.config.ts");
-        let workspace_state = personal_workspace_state(
-            !self.preview && config_path.is_file(),
-            self.personal_workspace_receiver.is_some(),
-            &self.personal_commands_status,
-        );
-        let last_error = self
-            .personal_workspace_error
-            .clone()
-            .or_else(|| self.personal_commands_status.last_reload_error.clone());
-        let open_config = config_path.clone();
-        let config_control = match workspace_state {
-            PersonalWorkspaceState::Missing => header_button("Create Config")
-                .id("personal-commands-create")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.provision_personal_workspace();
-                    cx.notify();
-                }))
-                .into_any_element(),
-            PersonalWorkspaceState::Creating => div()
-                .h(px(30.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .text_size(px(12.0))
-                .text_color(rgb(MUTED))
-                .child("Creating Config...")
-                .into_any_element(),
-            PersonalWorkspaceState::Ready | PersonalWorkspaceState::Error => {
-                header_button("Edit Config")
-                    .id("personal-commands-open-config")
-                    .on_click(move |_, _, _| open_path(&open_config))
-                    .into_any_element()
-            }
-        };
-        let copy_prompt = matches!(
-            workspace_state,
-            PersonalWorkspaceState::Ready | PersonalWorkspaceState::Error
-        )
-        .then(|| {
-            let copied = self.personal_commands_prompt_copied;
-            let workspace = self.personal_workspace.display();
-            let config = config_path.display();
-            let prompt = format!(
-                "Help me configure my HEX custom voice commands.\n\n\
-                 Workspace: {workspace}\n\
-                 Config: {config}\n\n\
-                 Read AGENTS.md and .agents/skills/personal-commands/SKILL.md in the workspace \
-                 before editing. Ask me what commands or dictation phrases I want, update \
-                 hex.config.ts, and run `bun run check` from the workspace when finished. You \
-                 may add npm packages when a command needs them."
-            );
-            header_button(if copied {
-                "Copied"
-            } else {
-                "Copy agent prompt"
-            })
-            .id("personal-commands-copy-prompt")
-            .on_click(cx.listener(move |this, _, _, cx| {
-                match arboard::Clipboard::new()
-                    .and_then(|mut clipboard| clipboard.set_text(prompt.clone()))
-                {
-                    Ok(()) => {
-                        this.personal_commands_prompt_copied = true;
-                        cx.notify();
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "could not copy personal command agent prompt")
-                    }
-                }
-            }))
-        });
-        let commands_position = self.commands_toggle.render_position(window);
-        let commands_toggle_control = if self.pending_microphone_policy
-            == Some(MicrophonePolicyChange::KeepReadyAndEnableCommands)
-        {
-            compact_button("Keep Microphone Ready & Enable Commands")
-                .id("confirm-enable-commands")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    if let Err(error) = this.update_microphone_policy(
-                        MicrophonePolicyChange::KeepReadyAndEnableCommands,
-                        cx,
-                    ) {
-                        tracing::error!(%error, "could not update microphone policy");
-                    }
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(div().text_size(px(11.0)).text_color(rgb(MUTED)).child(
-                    if self.settings.commands_enabled {
-                        "Enabled"
-                    } else {
-                        "Off"
-                    },
-                ))
-                .child(toggle(commands_position))
-                .into_any_element()
-        };
-        let commands_control = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(config_control)
-            .when_some(copy_prompt, |controls, prompt| controls.child(prompt))
-            .child(
-                div()
-                    .id("commands-enabled")
-                    .flex()
-                    .items_center()
-                    .child(commands_toggle_control)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let enabled = !this.settings.commands_enabled;
-                        if enabled && this.settings.release_microphone_while_idle {
-                            this.pending_microphone_policy =
-                                Some(MicrophonePolicyChange::KeepReadyAndEnableCommands);
-                            cx.notify();
-                            return;
-                        }
-                        if let Err(error) = this.developer_set_commands_enabled(enabled, cx) {
-                            tracing::error!(%error, "could not save app settings");
-                        }
-                    })),
-            )
-            .into_any_element();
-        let context_label = self.current_context_label();
-        let query = self
-            .command_search
-            .entity
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        let visible: Vec<usize> = self
-            .commands
-            .iter()
-            .enumerate()
-            .filter_map(|(index, command)| Self::command_matches(command, &query).then_some(index))
-            .collect();
-        let mut tasks = Vec::new();
-        for index in &visible {
-            let task = self.commands[*index].task.clone();
-            if !tasks.contains(&task) {
-                tasks.push(task);
-            }
-        }
-        let effective_selected = self
-            .selected_command
-            .clone()
-            .filter(|id| visible.iter().any(|index| self.commands[*index].id == *id))
-            .or_else(|| {
-                visible
-                    .first()
-                    .map(|index| self.commands[*index].id.clone())
-            });
-        let mut groups: Vec<AnyElement> = Vec::new();
-        for task in tasks {
-            groups.push(
-                compact_section_label(task.clone())
-                    .px_3()
-                    .pt_3()
-                    .pb_1()
-                    .text_color(rgb(MUTED))
-                    .into_any_element(),
-            );
-            groups.extend(
-                visible
-                    .iter()
-                    .copied()
-                    .filter(|index| self.commands[*index].task == task)
-                    .map(|index| {
-                        let command = self.commands[index].clone();
-                        let command_id = command.id.clone();
-                        let selected = effective_selected.as_deref() == Some(command_id.as_str());
-                        div()
-                            .id(("command", index))
-                            .w_full()
-                            .px_3()
-                            .py_2()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .rounded(px(6.0))
-                            .when(selected, |row| {
-                                row.bg(rgb(0x292929)).hover(|row| row.bg(rgb(0x303030)))
-                            })
-                            .when(!selected, |row| row.hover(|row| row.bg(rgb(SURFACE_HOVER))))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .text_size(px(12.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(command.phrase),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(if selected { TEXT_SOFT } else { FAINT }))
-                                    .truncate()
-                                    .child(command.description),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.selected_command = Some(command_id.clone());
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    }),
-            );
-        }
-
-        let no_commands = groups.is_empty();
-        let commands_list_width = PANE_LIST_WIDTH;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(pane_header_with_action("Commands", Some(commands_control)))
-            .child(
-                pane_body().p_5().child(
-                    pane_content()
-                        .gap_3()
-                        .when_some(last_error, |column, error| {
-                            column.child(
-                                compact_panel().flex_none().child(error_message(
-                                    "Personal commands are not loading.",
-                                    error,
-                                )),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_h(px(0.0))
-                                .flex()
-                                .gap_5()
-                                .child(
-                                    div()
-                                        .w(px(commands_list_width))
-                                        .h_full()
-                                        .flex_none()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .child(self.command_search.entity.clone()),
-                                        )
-                                        .child(
-                                            compact_panel()
-                                                .id("commands-list")
-                                                .flex_1()
-                                                .min_h(px(0.0))
-                                                .overflow_y_scroll()
-                                                .when(no_commands, |card| {
-                                                    card.child(empty_message(if query.is_empty() {
-                                                        "No commands yet."
-                                                    } else {
-                                                        "No matching commands."
-                                                    }))
-                                                })
-                                                .child(
-                                                    div()
-                                                        .w(px(commands_list_width - 2.0))
-                                                        .p_2()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .children(groups),
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .h_full()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .h(px(TEXT_INPUT_HEIGHT))
-                                                .flex_none()
-                                                .flex()
-                                                .items_center()
-                                                .justify_end()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(10.0))
-                                                        .text_color(rgb(FAINT))
-                                                        .child(format!("Context: {context_label}")),
-                                                ),
-                                        )
-                                        .child(
-                                            compact_panel()
-                                                .id("command-detail")
-                                                .flex_1()
-                                                .min_h(px(0.0))
-                                                .overflow_y_scroll()
-                                                .child(self.render_command_detail(
-                                                    effective_selected.as_deref(),
-                                                )),
-                                        ),
-                                ),
-                        ),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_command_detail(&self, selected: Option<&str>) -> AnyElement {
-        let Some(command) =
-            selected.and_then(|id| self.commands.iter().find(|command| command.id == id))
-        else {
-            return div()
-                .py(px(120.0))
-                .flex()
-                .justify_center()
-                .text_size(px(12.0))
-                .text_color(rgb(FAINT))
-                .child("Select a command.")
-                .into_any_element();
-        };
-        let aliases = if command.aliases.is_empty() {
-            "None".into()
-        } else {
-            command.aliases.join("\n")
-        };
-        div()
-            .p_5()
-            .child(
-                div()
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(command.phrase.clone()),
-            )
-            .child(
-                div()
-                    .pt_2()
-                    .text_size(px(12.0))
-                    .text_color(rgb(MUTED))
-                    .child(command.description.clone()),
-            )
-            .child(
-                div()
-                    .pt_4()
-                    .child(detail_row("Task", command.task.clone()))
-                    .child(detail_row("Context", command_scope(&command.scope)))
-                    .child(detail_row("Aliases", aliases)),
-            )
-            .into_any_element()
-    }
-
-    fn command_search_input(cx: &mut Context<Self>) -> ProcessingInput {
-        let entity = cx.new(|cx| TextInput::picker(cx, "Search commands", ""));
-        let changed = cx.subscribe(&entity, |_, _, _: &TextChanged, cx| {
-            cx.notify();
-        });
-        ProcessingInput {
-            entity,
-            _subscriptions: vec![changed],
-        }
-    }
-
-    /// Case-insensitive match over everything a person might remember about a
-    /// command: its phrase, aliases, description, and group.
-    fn command_matches(command: &CatalogCommand, query: &str) -> bool {
-        if query.is_empty() {
-            return true;
-        }
-        let scope = match &command.scope {
-            CommandScope::Sleeping | CommandScope::Global => "global",
-            CommandScope::Application(name) => name,
-            CommandScope::Browser(host) => host,
-        };
-        command.phrase.to_lowercase().contains(query)
-            || command.description.to_lowercase().contains(query)
-            || command.task.to_lowercase().contains(query)
-            || scope.to_lowercase().contains(query)
-            || command
-                .aliases
-                .iter()
-                .any(|alias| alias.to_lowercase().contains(query))
-    }
-
-    fn current_context(&self) -> (Option<String>, Option<String>) {
-        self.current_context.clone()
-    }
-
-    fn current_context_label(&self) -> String {
-        let (application, browser_host) = self.current_context();
-        match (application, browser_host) {
-            (Some(application), Some(host)) => format!("{application} / {host}"),
-            (Some(application), None) => application,
-            _ => "Unavailable".into(),
         }
     }
 
@@ -7320,7 +4690,7 @@ impl TranscriptionPickerDelegate for AppWindow {
 
 impl DesktopHost for AppWindow {
     fn capabilities(&self) -> DesktopCapabilities {
-        DesktopCapabilities::macos(crate::DEVELOPER_FEATURES_ENABLED)
+        DesktopCapabilities::macos()
     }
 
     fn snapshot(&self) -> DesktopSnapshot {
@@ -7440,12 +4810,9 @@ impl Render for AppWindow {
         let model_notice = self.render_model_notice(cx);
         let content = match self.pane {
             Pane::HudLab => self.render_hud_lab(cx),
-            Pane::Meetings => self.render_meetings(cx),
-            Pane::Commands => self.render_commands(window, cx),
             Pane::Activity => self.render_activity(cx),
             Pane::History => self.render_history(cx),
             Pane::Modes => self.render_modes(window, cx),
-            Pane::VoiceAction => self.render_voice_action(window, cx),
             Pane::Settings => self.render_settings(window, cx),
         };
         let transcription_picker = self
@@ -7473,13 +4840,6 @@ impl Render for AppWindow {
                 if event.keystroke.key == "escape" && this.transcription_picker_language.is_some() {
                     cx.stop_propagation();
                     this.dismiss_transcription_picker(cx);
-                    return;
-                }
-                if event.keystroke.key == "escape"
-                    && this.pending_microphone_policy.take().is_some()
-                {
-                    cx.stop_propagation();
-                    cx.notify();
                 }
             }))
             .on_mouse_down(
@@ -7499,14 +4859,6 @@ impl Render for AppWindow {
             }))
             .on_action(cx.listener(|this, _: &ShowModes, window, cx| {
                 this.select_pane(Pane::Modes, cx);
-                window.activate_window();
-            }))
-            .on_action(cx.listener(|this, _: &ShowVoiceAction, window, cx| {
-                this.select_pane(Pane::VoiceAction, cx);
-                window.activate_window();
-            }))
-            .on_action(cx.listener(|this, _: &ShowCommands, window, cx| {
-                this.select_pane(Pane::Commands, cx);
                 window.activate_window();
             }))
             .on_action(cx.listener(|this, _: &ShowHistory, window, cx| {
@@ -7562,14 +4914,6 @@ fn preview_history() -> Option<History> {
             Some(("Messages", 610)),
         ),
         (
-            42 * 60 * 1_000,
-            HistoryKind::VoiceAction,
-            "write a haiku about warm tea",
-            "Steam curls from the cup—\nafternoon light through the glass,\nthe first sip of calm.",
-            Some("Brave Browser"),
-            None,
-        ),
-        (
             4 * 60 * 1_000,
             HistoryKind::Dictation,
             "so um remember to publish the appcast after validating the artifact and uh \
@@ -7604,85 +4948,14 @@ fn preview_history() -> Option<History> {
     Some(History::new(store))
 }
 
-fn voice_action_status_copy(enabled: bool) -> (&'static str, &'static str) {
-    if enabled {
-        (
-            "Enabled",
-            "Use the shortcut below with OpenCode to run spoken instructions.",
-        )
-    } else {
-        (
-            "Off",
-            "Off by default. Its saved shortcut is not reserved until you enable Voice Action.",
-        )
-    }
-}
-
-fn set_voice_action_enabled(settings: &mut AppSettings, enabled: bool) -> Result<(), &'static str> {
-    if enabled && hotkey_binding_conflicts(settings, HotkeyKind::Edit, &settings.edit_hotkey) {
-        return Err(
-            "The Voice Action shortcut is already in use. Change it below or change the other shortcut before enabling Voice Action.",
-        );
-    }
-    settings.voice_action.enabled = enabled;
-    Ok(())
-}
-
-fn voice_action_setting_row(
-    title: &'static str,
-    description: impl Into<SharedString>,
-    control: impl IntoElement,
-    divider: bool,
-    compact: bool,
-) -> Div {
-    div()
-        .w_full()
-        .min_h(px(64.0))
-        .px_3()
-        .py_3()
-        .flex()
-        .when(compact, |row| row.flex_col().items_start().gap_3())
-        .when(!compact, |row| row.items_center().justify_between().gap_4())
-        .when(divider, |row| row.border_b_1().border_color(rgb(LINE)))
-        .child(
-            div()
-                .min_w(px(0.0))
-                .when(!compact, |copy| copy.flex_1())
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT))
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .line_height(px(14.0))
-                        .text_color(rgb(MUTED))
-                        .child(description.into()),
-                ),
-        )
-        .child(
-            div()
-                .when(compact, |field| field.w_full())
-                .when(!compact, |field| field.flex_none())
-                .child(control),
-        )
-}
-
 fn hotkey_idle_width(keycap_count: usize) -> f32 {
     (112.0 + hotkey_keycaps_width(keycap_count)).max(HOTKEY_MIN_WIDTH)
 }
 
 const fn hotkey_kind_index(kind: HotkeyKind) -> usize {
     match kind {
-        HotkeyKind::Dictation => 0,
-        HotkeyKind::Edit => 1,
-        HotkeyKind::PasteLast => 2,
+        HotkeyKind::Dictation | HotkeyKind::DictationAlternative(_) => 0,
+        HotkeyKind::PasteLast => 1,
     }
 }
 
@@ -7728,18 +5001,24 @@ fn hotkey_binding_conflicts(
 ) -> bool {
     let mut others = match kind {
         HotkeyKind::Dictation => Vec::new(),
-        HotkeyKind::Edit | HotkeyKind::PasteLast => vec![settings.dictation_hotkey.clone()],
+        HotkeyKind::DictationAlternative(_) | HotkeyKind::PasteLast => {
+            vec![settings.dictation_hotkey.clone()]
+        }
     };
-    if kind != HotkeyKind::Edit && settings.voice_action.enabled {
-        others.push(settings.edit_hotkey.clone());
-    }
+    others.extend(
+        settings
+            .dictation_hotkey_alternatives
+            .iter()
+            .enumerate()
+            .filter(|(index, alternative)| {
+                kind != HotkeyKind::DictationAlternative(*index) && !alternative.is_empty()
+            })
+            .map(|(_, alternative)| alternative.clone()),
+    );
     if kind != HotkeyKind::PasteLast
         && let Some(paste) = &settings.paste_last_hotkey
     {
         others.push(paste.clone());
-    }
-    if crate::DEVELOPER_FEATURES_ENABLED {
-        others.push(HotkeyBinding::paste_meeting_default());
     }
     crate::app_settings::hotkey_conflicts(binding, others)
 }
@@ -7751,7 +5030,9 @@ fn hotkey_side_binding(
 ) -> Option<HotkeyBinding> {
     let mut binding = match kind {
         HotkeyKind::Dictation => &settings.dictation_hotkey,
-        HotkeyKind::Edit => &settings.edit_hotkey,
+        HotkeyKind::DictationAlternative(index) => {
+            settings.dictation_hotkey_alternatives.get(index)?
+        }
         HotkeyKind::PasteLast => settings.paste_last_hotkey.as_ref()?,
     }
     .clone();
@@ -7821,14 +5102,6 @@ fn sound_volume_index(settings: &AppSettings) -> usize {
                 .total_cmp(&(settings.sound_effect_volume - **right).abs())
         })
         .map_or(0, |(index, _)| index + 1)
-}
-
-fn open_opencode_beta_docs() {
-    if let Err(error) = crate::commands::execute(crate::commands::Action::OpenUrl(
-        OPENCODE_BETA_DOCS_URL.into(),
-    )) {
-        tracing::error!(%error, "could not open the OpenCode beta documentation");
-    }
 }
 
 fn advance_highlight(current: usize, direction: i32, count: usize) -> usize {
@@ -7985,164 +5258,6 @@ fn application_icon(
         .into_any_element()
 }
 
-fn filtered_model_keys(catalog: &ModelCatalog, query: &str) -> Vec<Option<String>> {
-    let mut choices = Vec::new();
-    if query.is_empty() && catalog.default_name.is_some() {
-        choices.push(None);
-    }
-    choices.extend(
-        catalog
-            .models
-            .iter()
-            .filter(|choice| {
-                query.is_empty()
-                    || choice.key.to_lowercase().contains(query)
-                    || choice.name.to_lowercase().contains(query)
-                    || choice.provider.to_lowercase().contains(query)
-            })
-            .take(8)
-            .map(|choice| Some(choice.key.clone())),
-    );
-    choices
-}
-
-fn model_presentation(
-    catalog: &ModelCatalogState,
-    selected_key: Option<&str>,
-) -> Option<ModelPresentation> {
-    let ModelCatalogState::Loaded(catalog) = catalog else {
-        return selected_key.map(fallback_model_presentation);
-    };
-    let is_default = selected_key.is_none();
-    let key = selected_key.or(catalog.default_key.as_deref())?;
-    let choice = catalog.models.iter().find(|choice| choice.key == key);
-    let name = choice
-        .map(|choice| choice.name.clone())
-        .or_else(|| is_default.then(|| catalog.default_name.clone()).flatten())
-        .unwrap_or_else(|| model_id(key).to_owned());
-    let provider = choice
-        .map(|choice| provider_label(&choice.provider))
-        .unwrap_or_else(|| {
-            provider_label(key.split_once('/').map_or(key, |(provider, _)| provider))
-        });
-    Some(ModelPresentation {
-        name,
-        provider,
-        key: key.to_owned(),
-        is_default,
-    })
-}
-
-fn apply_model_variant(
-    settings: &mut AppSettings,
-    target: ModelPickerTarget,
-    variant: Option<String>,
-    catalog: &ModelCatalogState,
-) {
-    let (model, selected_variant) = match target {
-        ModelPickerTarget::Mode(selection) => {
-            let processing = match selection {
-                ModeSelection::Default => {
-                    &mut settings.dictation_processing.default_mode.post_processing
-                }
-                ModeSelection::Custom(index) => {
-                    &mut settings.dictation_processing.modes[index].post_processing
-                }
-            };
-            (&mut processing.model, &mut processing.variant)
-        }
-        ModelPickerTarget::VoiceAction => (
-            &mut settings.voice_action.model,
-            &mut settings.voice_action.variant,
-        ),
-    };
-    if variant.is_some()
-        && model.is_none()
-        && let ModelCatalogState::Loaded(catalog) = catalog
-    {
-        // V2 variants belong to an explicit catalog model, not the floating default.
-        *model = catalog.default_key.clone();
-    }
-    *selected_variant = variant;
-}
-
-fn model_variants(catalog: &ModelCatalog, selected_key: Option<&str>) -> Vec<String> {
-    selected_key
-        .or(catalog.default_key.as_deref())
-        .and_then(|key| catalog.models.iter().find(|choice| choice.key == key))
-        .map_or_else(Vec::new, |choice| choice.variants.clone())
-}
-
-fn fallback_model_presentation(key: &str) -> ModelPresentation {
-    let provider = key.split_once('/').map_or(key, |(provider, _)| provider);
-    ModelPresentation {
-        name: model_id(key).to_owned(),
-        provider: provider_label(provider),
-        key: key.to_owned(),
-        is_default: false,
-    }
-}
-
-fn model_id(key: &str) -> &str {
-    key.split_once('/').map_or(key, |(_, model)| model)
-}
-
-fn provider_label(provider: &str) -> String {
-    if provider.eq_ignore_ascii_case("opencode") {
-        return "OpenCode".into();
-    }
-    provider
-        .split(['-', '_'])
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut characters = part.chars();
-            characters.next().map_or_else(String::new, |first| {
-                first.to_uppercase().chain(characters).collect()
-            })
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn model_choice_row(
-    title: impl Into<String>,
-    subtitle: impl Into<String>,
-    highlighted: bool,
-) -> Div {
-    div()
-        .w_full()
-        .px_3()
-        .py_2()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .border_b_1()
-        .border_color(rgb(LINE))
-        .when(highlighted, |row| row.bg(rgb(SURFACE_SELECTED)))
-        .hover(|row| row.bg(rgb(SURFACE_HOVER)))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(TEXT_SOFT))
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(rgb(FAINT))
-                .child(subtitle.into()),
-        )
-}
-
-fn settings_input(
-    label: &'static str,
-    description: impl Into<String>,
-    input: Entity<TextInput>,
-) -> AnyElement {
-    settings_control(label, description, input)
-}
-
 fn compact_mode_field(label: &'static str, control: impl IntoElement) -> Div {
     div()
         .flex_1()
@@ -8152,41 +5267,6 @@ fn compact_mode_field(label: &'static str, control: impl IntoElement) -> Div {
         .gap_1()
         .child(div().text_size(px(9.0)).text_color(rgb(FAINT)).child(label))
         .child(control)
-}
-
-fn settings_control(
-    label: &'static str,
-    description: impl Into<String>,
-    control: impl IntoElement,
-) -> AnyElement {
-    div()
-        .flex_1()
-        .min_w(px(0.0))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT_SOFT))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(FAINT))
-                        .child(description.into()),
-                ),
-        )
-        .child(control)
-        .into_any_element()
 }
 
 fn input_text(input: &ProcessingInput, cx: &App) -> String {
@@ -8215,19 +5295,6 @@ fn browser_hosts(value: &str) -> Vec<String> {
     hosts
 }
 
-fn reorder_transformation(values: &mut Vec<String>, id: &str, target_index: usize) -> bool {
-    let Some(from) = values.iter().position(|candidate| candidate == id) else {
-        return false;
-    };
-    if from == target_index {
-        return false;
-    }
-    let value = values.remove(from);
-    let target = target_index.min(values.len());
-    values.insert(target, value);
-    true
-}
-
 fn apply_mode_inputs(inputs: &ModeInputs, mode: &mut DictationMode, is_default: bool, cx: &App) {
     mode.name = if is_default {
         "Global".into()
@@ -8243,12 +5310,6 @@ fn apply_mode_inputs(inputs: &ModeInputs, mode: &mut DictationMode, is_default: 
         replacement.matched_phrase = inputs.matched_phrase.entity.read(cx).text().to_string();
         replacement.output = inputs.output.entity.read(cx).text().to_string();
     }
-    mode.post_processing.enabled = inputs.processing_toggle.enabled();
-    mode.post_processing.prompt = input_text(&inputs.prompt, cx);
-    mode.post_processing.deadline_seconds = input_text(&inputs.deadline, cx)
-        .parse::<u64>()
-        .unwrap_or(mode.post_processing.deadline_seconds)
-        .max(1);
 }
 
 fn dictation_model_notice(
@@ -8269,20 +5330,6 @@ fn dictation_model_notice(
             "The dictation shortcut needs a local speech model. Choose one to download first.",
         )
     })
-}
-
-fn command_model_notice(status: &CommandModelStatus) -> Option<(&'static str, &'static str)> {
-    match status {
-        CommandModelStatus::Disabled | CommandModelStatus::Ready => None,
-        CommandModelStatus::Loading => Some((
-            "Preparing voice commands",
-            "The command model is loading. Hotkey dictation does not require it.",
-        )),
-        CommandModelStatus::Failed => Some((
-            "Voice commands are unavailable",
-            "The command model could not load. Retry or turn off commands; hotkey dictation is unaffected.",
-        )),
-    }
 }
 
 fn setup_row(title: &'static str, description: &'static str, control: AnyElement) -> Div {
@@ -8485,114 +5532,6 @@ fn detail_row(label: &'static str, value: impl Into<String>) -> AnyElement {
         .into_any_element()
 }
 
-fn command_task(command: &CommandInfo) -> String {
-    if let Some(group) = &command.group {
-        return group.clone();
-    }
-    if command.id.starts_with("mode.") {
-        "Voice control".into()
-    } else if command.id.starts_with("dictation.") {
-        "Dictation".into()
-    } else if command.id.starts_with("meeting.") {
-        "Meetings".into()
-    } else {
-        match command.description.as_str() {
-            "Open application" => "Open applications",
-            "Open website" => "Open websites",
-            "Navigate active tab" => "Browser navigation",
-            "Use keyboard shortcut" => "Keyboard",
-            "Use application shortcut" | "Open application destination" => "Application navigation",
-            _ => "Other",
-        }
-        .into()
-    }
-}
-
-fn merged_catalog(compiled: &[CatalogCommand], personal: &StatusSnapshot) -> Vec<CatalogCommand> {
-    let mut commands = compiled.to_vec();
-    commands.extend(personal.catalog.iter().filter_map(|command| {
-        let (phrase, aliases) = command.phrases.split_first()?;
-        Some(CatalogCommand {
-            task: command.group.clone(),
-            scope: match &command.context {
-                StatusContext::Global => CommandScope::Global,
-                StatusContext::Application { application } => {
-                    CommandScope::Application(application.clone())
-                }
-                StatusContext::BrowserHost { browser_host } => {
-                    CommandScope::Browser(browser_host.clone())
-                }
-            },
-            phrase: phrase.clone(),
-            aliases: aliases.to_vec(),
-            description: command.description.clone(),
-            id: command.id.clone(),
-        })
-    }));
-    commands
-}
-
-fn open_path(path: &std::path::Path) {
-    if let Err(error) = ProcessCommand::new("/usr/bin/open").arg(path).spawn() {
-        tracing::error!(%error, path = %path.display(), "could not open personal command path");
-    }
-}
-
-fn command_scope(scope: &CommandScope) -> String {
-    match scope {
-        CommandScope::Sleeping | CommandScope::Global => "Global".into(),
-        CommandScope::Application(application) => application.clone(),
-        CommandScope::Browser(host) => host.clone(),
-    }
-}
-
-fn meeting_status(status: MeetingStatus) -> &'static str {
-    match status {
-        MeetingStatus::Starting => "Starting",
-        MeetingStatus::Recording => "Recording",
-        MeetingStatus::Transcribing => "Finalizing",
-        MeetingStatus::Complete => "Complete",
-        MeetingStatus::Interrupted => "Interrupted",
-        MeetingStatus::Failed => "Failed",
-    }
-}
-
-fn meeting_progress_action(label: &'static str) -> AnyElement {
-    div()
-        .h(px(30.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_sm()
-        .bg(rgb(SURFACE))
-        .text_size(px(12.0))
-        .text_color(rgb(MUTED))
-        .child(label)
-        .into_any_element()
-}
-
-fn log_meeting_request_error(error: TrySendError<MeetingRequest>) {
-    match error {
-        TrySendError::Full(_) => tracing::warn!("meeting controller is busy"),
-        TrySendError::Disconnected(_) => tracing::error!("meeting controller is unavailable"),
-    }
-}
-
-fn meeting_duration(meeting: &MeetingManifest) -> u64 {
-    meeting.duration_ms.unwrap_or_else(|| {
-        if matches!(
-            meeting.status,
-            MeetingStatus::Starting | MeetingStatus::Recording
-        ) {
-            now_ms().saturating_sub(meeting.created_at_ms)
-        } else {
-            meeting
-                .ended_at_ms
-                .map_or(0, |ended| ended.saturating_sub(meeting.created_at_ms))
-        }
-    })
-}
-
 fn activity_context(reader: &EventReader) -> (Option<String>, Option<String>) {
     reader
         .current_context()
@@ -8670,7 +5609,6 @@ fn event_summary(event: &VoiceEvent) -> String {
                 DictationPhase::VoiceAction => text_or("Voice Action completed", text),
                 DictationPhase::Logged => text_or("Journal entry was saved", text),
                 DictationPhase::Repasted => text_or("The last dictation was pasted again", text),
-                DictationPhase::MeetingPasted => text_or("New meeting transcript was pasted", text),
                 DictationPhase::Failed(error) => format!("Dictation failed: {error}"),
             };
             processing
@@ -8724,7 +5662,6 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::personal_commands::StatusExecution;
 
     #[gpui::test]
     fn settings_content_stays_inside_the_pane_at_supported_widths(cx: &mut gpui::TestAppContext) {
@@ -8770,21 +5707,6 @@ mod tests {
     }
 
     #[test]
-    fn command_model_failure_has_recovery_without_blocking_dictation() {
-        assert!(command_model_notice(&CommandModelStatus::Ready).is_none());
-        assert!(command_model_notice(&CommandModelStatus::Disabled).is_none());
-        assert_eq!(
-            command_model_notice(&CommandModelStatus::Loading)
-                .unwrap()
-                .0,
-            "Preparing voice commands"
-        );
-        let (_, description) = command_model_notice(&CommandModelStatus::Failed).unwrap();
-        assert!(description.contains("Retry"));
-        assert!(description.contains("dictation is unaffected"));
-    }
-
-    #[test]
     fn opening_the_app_prioritizes_settings_and_missing_permissions() {
         assert_eq!(Pane::default(), Pane::Settings);
         let ready = SetupStatus {
@@ -8809,7 +5731,6 @@ mod tests {
             },
         ] {
             assert_eq!(Pane::Modes.on_reopen(status), Pane::Settings);
-            assert_eq!(Pane::VoiceAction.on_reopen(status), Pane::Settings);
             assert_eq!(Pane::Settings.on_reopen(status), Pane::Settings);
         }
         assert_eq!(Pane::from_preview(PreviewPane::Modes), Pane::Modes);
@@ -8902,103 +5823,16 @@ mod tests {
     }
 
     #[test]
-    fn voice_action_defaults_off_and_explains_its_inactive_shortcut() {
-        let settings = AppSettings::default();
-        assert!(!settings.voice_action.enabled);
-        let (status, description) = voice_action_status_copy(settings.voice_action.enabled);
-        assert_eq!(status, "Off");
-        assert!(description.contains("Off by default"));
-        assert!(description.contains("not reserved"));
-
-        let (status, description) = voice_action_status_copy(true);
-        assert_eq!(status, "Enabled");
-        assert!(description.contains("OpenCode"));
-        assert!(!description.contains("not reserved"));
-    }
-
-    #[test]
-    fn disabled_voice_action_does_not_reserve_its_shortcut() {
-        let mut settings = AppSettings::default();
-        for enabled in [false, true] {
-            settings.voice_action.enabled = enabled;
-            for kind in [HotkeyKind::Dictation, HotkeyKind::PasteLast] {
-                assert_eq!(
-                    hotkey_binding_conflicts(&settings, kind, &settings.edit_hotkey),
-                    enabled,
-                );
-            }
-        }
-        settings.voice_action.enabled = false;
-        assert!(hotkey_binding_conflicts(
-            &settings,
-            HotkeyKind::Edit,
-            &settings.dictation_hotkey,
-        ));
-    }
-
-    #[test]
-    fn voice_action_opt_in_rejects_active_conflicts_without_rebinding() {
-        let defaults = AppSettings::default();
-        let mut active = vec![
-            defaults.dictation_hotkey,
-            defaults.paste_last_hotkey.unwrap(),
-        ];
-        if crate::DEVELOPER_FEATURES_ENABLED {
-            active.push(HotkeyBinding::paste_meeting_default());
-        }
-        for binding in active {
-            let mut settings = AppSettings {
-                edit_hotkey: binding,
-                ..AppSettings::default()
-            };
-            let before = serde_json::to_value(&settings).unwrap();
-            let error = set_voice_action_enabled(&mut settings, true).unwrap_err();
-
-            assert!(error.contains("already in use"));
-            assert!(error.contains("Change it below"));
-            assert_eq!(serde_json::to_value(&settings).unwrap(), before);
-        }
-    }
-
-    #[test]
-    fn voice_action_toggle_preserves_configuration_and_can_always_disable() {
-        let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
-            "voice_action": {
-                "model": "example/saved-model",
-                "variant": "high",
-                "deadline_seconds": 45
-            },
-            "edit_hotkey": {
-                "modifiers": { "control": "left" }
-            }
-        }))
-        .unwrap();
-        assert!(!settings.voice_action.enabled);
-        let mut expected = serde_json::to_value(&settings).unwrap();
-        for enabled in [true, false] {
-            set_voice_action_enabled(&mut settings, enabled).unwrap();
-            expected["voice_action"]["enabled"] = serde_json::json!(enabled);
-            assert_eq!(serde_json::to_value(&settings).unwrap(), expected);
-        }
-
-        set_voice_action_enabled(&mut settings, true).unwrap();
-        settings.dictation_hotkey = settings.edit_hotkey.clone();
-        set_voice_action_enabled(&mut settings, false).unwrap();
-        assert!(!settings.voice_action.enabled);
-    }
-
-    #[test]
     fn shortcut_side_changes_reject_overlap_without_changing_the_saved_binding() {
         let mut settings = AppSettings::default();
-        settings.voice_action.enabled = true;
         settings.dictation_hotkey.modifiers.option = Some(ModifierSide::Left);
-        settings.edit_hotkey = HotkeyBinding {
+        settings.paste_last_hotkey = Some(HotkeyBinding {
             modifiers: HotkeyModifiers {
                 option: Some(ModifierSide::Right),
                 ..Default::default()
             },
             key: None,
-        };
+        });
         let original = settings.dictation_hotkey.clone();
 
         assert!(
@@ -9013,7 +5847,7 @@ mod tests {
             Some(original)
         );
 
-        settings.edit_hotkey = HotkeyBinding::edit_default();
+        settings.paste_last_hotkey = Some(HotkeyBinding::paste_last_default());
         let candidate =
             hotkey_side_binding(&settings, HotkeyKind::Dictation, ModifierSide::Right).unwrap();
         assert_eq!(
@@ -9052,16 +5886,10 @@ mod tests {
     }
 
     #[test]
-    fn production_navigation_keeps_commands_available_as_an_opt_in() {
+    fn production_navigation_shows_only_shipped_panes() {
         assert_eq!(
-            Pane::all(DesktopCapabilities::macos(false)),
-            vec![
-                Pane::Settings,
-                Pane::Modes,
-                Pane::Commands,
-                Pane::VoiceAction,
-                Pane::History,
-            ]
+            Pane::all(DesktopCapabilities::macos()),
+            vec![Pane::Settings, Pane::Modes, Pane::History]
         );
     }
 
@@ -9154,25 +5982,6 @@ mod tests {
     }
 
     #[test]
-    fn transformations_reorder_in_both_directions() {
-        let mut transformations = vec!["one".into(), "two".into(), "three".into()];
-
-        assert!(reorder_transformation(&mut transformations, "one", 2));
-        assert_eq!(transformations, ["two", "three", "one"]);
-        assert!(reorder_transformation(&mut transformations, "one", 0));
-        assert_eq!(transformations, ["one", "two", "three"]);
-    }
-
-    #[test]
-    fn transformation_reorder_ignores_same_position_and_missing_ids() {
-        let mut transformations = vec!["one".into(), "two".into()];
-
-        assert!(!reorder_transformation(&mut transformations, "one", 0));
-        assert!(!reorder_transformation(&mut transformations, "missing", 1));
-        assert_eq!(transformations, ["one", "two"]);
-    }
-
-    #[test]
     fn picker_arrows_stop_at_the_ends() {
         assert_eq!(advance_highlight(0, -1, 4), 0);
         assert_eq!(advance_highlight(2, 1, 4), 3);
@@ -9196,263 +6005,5 @@ mod tests {
             &selection.language,
             true
         ));
-    }
-
-    #[test]
-    fn selected_model_presents_provider_name_and_resolved_key() {
-        let catalog = ModelCatalogState::Loaded(ModelCatalog {
-            models: vec![crate::dictation_processor::ModelChoice {
-                key: "opencode/example-rewrite".into(),
-                name: "Example Rewrite".into(),
-                provider: "opencode".into(),
-                variants: Vec::new(),
-            }],
-            default_key: Some("opencode/example-rewrite".into()),
-            default_name: Some("Example Rewrite".into()),
-        });
-
-        let selected = model_presentation(&catalog, Some("opencode/example-rewrite")).unwrap();
-        assert_eq!(selected.name, "Example Rewrite");
-        assert_eq!(selected.provider, "OpenCode");
-        assert_eq!(selected.key, "opencode/example-rewrite");
-        assert!(!selected.is_default);
-
-        let default = model_presentation(&catalog, None).unwrap();
-        assert!(default.is_default);
-    }
-
-    #[test]
-    fn model_search_finds_provider_models_with_nested_ids() {
-        let catalog = ModelCatalog {
-            models: vec![crate::dictation_processor::ModelChoice {
-                key: "console-groq/openai/gpt-oss-120b".into(),
-                name: "GPT OSS 120B".into(),
-                provider: "console-groq".into(),
-                variants: Vec::new(),
-            }],
-            default_key: None,
-            default_name: None,
-        };
-
-        assert_eq!(
-            filtered_model_keys(&catalog, "gpt oss"),
-            [Some("console-groq/openai/gpt-oss-120b".into())]
-        );
-    }
-
-    #[test]
-    fn opencode_failure_copy_preserves_the_actionable_error() {
-        let state = ModelCatalogState::Failed(
-            "OpenCode /api/model failed: config.providers was invalid".into(),
-        );
-
-        let copy = opencode_unavailable_copy(&state, OpenCodeFeature::VoiceAction).unwrap();
-
-        assert_eq!(copy.title, "OpenCode is unavailable");
-        assert_eq!(
-            copy.description,
-            "HEX could not load the OpenCode model catalog."
-        );
-        assert_eq!(
-            copy.error,
-            Some("OpenCode /api/model failed: config.providers was invalid")
-        );
-        assert!(copy.can_retry);
-        assert!(!copy.can_open_setup);
-    }
-
-    #[test]
-    fn opencode_missing_copy_offers_setup_without_an_error() {
-        let copy =
-            opencode_unavailable_copy(&ModelCatalogState::Missing, OpenCodeFeature::VoiceAction)
-                .unwrap();
-
-        assert_eq!(copy.title, "Voice Action requires OpenCode");
-        assert_eq!(copy.error, None);
-        assert!(copy.can_retry);
-        assert!(copy.can_open_setup);
-    }
-
-    #[test]
-    fn opencode_transformation_copy_describes_modes_without_changing_actions() {
-        let loading =
-            opencode_unavailable_copy(&ModelCatalogState::Loading, OpenCodeFeature::Transformation)
-                .unwrap();
-        assert_eq!(loading.title, "Checking for OpenCode");
-        assert_eq!(
-            loading.description,
-            "OpenCode transformation will be available after HEX connects to OpenCode."
-        );
-        assert!(!loading.can_retry);
-        assert!(!loading.can_open_setup);
-
-        let missing =
-            opencode_unavailable_copy(&ModelCatalogState::Missing, OpenCodeFeature::Transformation)
-                .unwrap();
-        assert_eq!(missing.title, "Transformation requires OpenCode");
-        assert_eq!(
-            missing.description,
-            "Install and configure OpenCode to transform dictated text."
-        );
-        assert_eq!(missing.error, None);
-        assert!(missing.can_retry);
-        assert_eq!(missing.retry_label, "Check again");
-        assert!(missing.can_open_setup);
-
-        let failed = ModelCatalogState::Failed("catalog failure".into());
-        let error = opencode_unavailable_copy(&failed, OpenCodeFeature::Transformation).unwrap();
-        assert_eq!(error.title, "OpenCode is unavailable");
-        assert_eq!(error.error, Some("catalog failure"));
-        assert!(error.can_retry);
-        assert!(!error.can_open_setup);
-        let loaded = ModelCatalogState::Loaded(ModelCatalog {
-            models: Vec::new(),
-            default_key: None,
-            default_name: None,
-        });
-        for feature in [
-            OpenCodeFeature::VoiceAction,
-            OpenCodeFeature::Transformation,
-        ] {
-            assert!(opencode_unavailable_copy(&loaded, feature).is_none());
-        }
-    }
-
-    #[test]
-    fn opencode_errors_are_bounded_without_splitting_utf8() {
-        let error = "é".repeat(MAX_OPENCODE_ERROR_BYTES);
-        let bounded = bounded_opencode_error(&error);
-
-        assert!(bounded.ends_with('…'));
-        assert!(bounded.is_char_boundary(bounded.len()));
-        assert!(bounded.len() <= MAX_OPENCODE_ERROR_BYTES + '…'.len_utf8());
-    }
-
-    #[test]
-    fn default_model_exposes_its_thinking_variants() {
-        let catalog = ModelCatalog {
-            models: vec![crate::dictation_processor::ModelChoice {
-                key: "opencode/example-rewrite".into(),
-                name: "Example Rewrite".into(),
-                provider: "opencode".into(),
-                variants: vec!["low".into(), "high".into()],
-            }],
-            default_key: Some("opencode/example-rewrite".into()),
-            default_name: Some("Example Rewrite".into()),
-        };
-
-        assert_eq!(model_variants(&catalog, None), ["low", "high"]);
-    }
-
-    #[test]
-    fn model_variant_selection_resolves_defaults_without_replacing_explicit_models() {
-        let catalog = ModelCatalogState::Loaded(ModelCatalog {
-            models: Vec::new(),
-            default_key: Some("example/rewrite-default".into()),
-            default_name: Some("Example Rewrite".into()),
-        });
-        for (target, path) in [
-            (
-                ModelPickerTarget::Mode(ModeSelection::Default),
-                "/dictation_processing/default_mode/post_processing",
-            ),
-            (
-                ModelPickerTarget::Mode(ModeSelection::Custom(0)),
-                "/dictation_processing/modes/0/post_processing",
-            ),
-            (ModelPickerTarget::VoiceAction, "/voice_action"),
-        ] {
-            for model in [None, Some("example/explicit-selection")] {
-                for variant in [None, Some("high")] {
-                    let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
-                        "dictation_processing": {
-                            "default_mode": { "post_processing": { "model": model, "variant": "low" } },
-                            "modes": [{ "post_processing": { "model": model, "variant": "low" } }]
-                        },
-                        "voice_action": { "model": model, "variant": "low" }
-                    }))
-                    .unwrap();
-                    let mut expected = serde_json::to_value(&settings).unwrap();
-                    let selection = expected.pointer_mut(path).unwrap();
-                    selection["model"] =
-                        serde_json::json!(model.or(variant.map(|_| "example/rewrite-default")));
-                    selection["variant"] = serde_json::json!(variant);
-
-                    apply_model_variant(
-                        &mut settings,
-                        target,
-                        variant.map(str::to_owned),
-                        &catalog,
-                    );
-
-                    assert_eq!(serde_json::to_value(&settings).unwrap(), expected);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn custom_catalog_preserves_groups() {
-        let compiled = vec![CatalogCommand {
-            task: "Built in".into(),
-            scope: CommandScope::Global,
-            phrase: "built in".into(),
-            aliases: Vec::new(),
-            description: "Compiled command".into(),
-            id: "compiled".into(),
-        }];
-        let status = StatusSnapshot {
-            catalog: vec![
-                crate::personal_commands::StatusCommand {
-                    id: "default".into(),
-                    phrases: vec!["default custom".into()],
-                    group: "Other".into(),
-                    description: "Custom command".into(),
-                    context: StatusContext::Global,
-                    execution: StatusExecution::Handler,
-                },
-                crate::personal_commands::StatusCommand {
-                    id: "work".into(),
-                    phrases: vec!["do work".into()],
-                    group: "Work".into(),
-                    description: "Do work".into(),
-                    context: StatusContext::Global,
-                    execution: StatusExecution::Handler,
-                },
-            ],
-            ..StatusSnapshot::default()
-        };
-
-        let merged = merged_catalog(&compiled, &status);
-        assert_eq!(merged[0].task, "Built in");
-        assert_eq!(merged[1].task, "Other");
-        assert_eq!(merged[2].task, "Work");
-    }
-
-    #[test]
-    fn personal_workspace_states_cover_setup_and_runtime_failures() {
-        let mut status = StatusSnapshot::default();
-        assert_eq!(
-            personal_workspace_state(false, false, &status),
-            PersonalWorkspaceState::Missing
-        );
-        assert_eq!(
-            personal_workspace_state(false, true, &status),
-            PersonalWorkspaceState::Creating
-        );
-        assert_eq!(
-            personal_workspace_state(true, false, &status),
-            PersonalWorkspaceState::Ready
-        );
-        status.host_state = HostState::Unavailable;
-        assert_eq!(
-            personal_workspace_state(true, false, &status),
-            PersonalWorkspaceState::Error
-        );
-        status.active_generation = Some(3);
-        assert_eq!(
-            personal_workspace_state(true, false, &status),
-            PersonalWorkspaceState::Ready
-        );
     }
 }

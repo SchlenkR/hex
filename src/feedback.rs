@@ -14,10 +14,6 @@ use rodio::{Decoder, DeviceSinkBuilder, Source};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tone {
     #[cfg(target_os = "macos")]
-    Wake,
-    #[cfg(target_os = "macos")]
-    Sleep,
-    #[cfg(target_os = "macos")]
     Error,
     DictationStart,
     DictationStop,
@@ -164,7 +160,7 @@ pub fn preload() -> Result<()> {
                 Tone::DictationStop => &stop,
                 Tone::Cancel => &cancel,
                 #[cfg(target_os = "macos")]
-                Tone::Wake | Tone::Sleep | Tone::Error => continue,
+                Tone::Error => continue,
             };
             sink.mixer().add(sound.clone().amplify(volume()));
         }
@@ -183,7 +179,7 @@ pub fn play(tone: Tone) {
             enqueue(DICTATION_PLAYER.get(), tone);
         }
         #[cfg(target_os = "macos")]
-        Tone::Wake | Tone::Sleep | Tone::Error => play_system_sound(tone),
+        Tone::Error => play_system_sound(tone),
     }
 }
 
@@ -196,8 +192,6 @@ fn enqueue(player: Option<&SyncSender<Tone>>, tone: Tone) {
 #[cfg(target_os = "macos")]
 fn play_system_sound(tone: Tone) {
     let sound = match tone {
-        Tone::Wake => "Pop",
-        Tone::Sleep => "Tink",
         Tone::Error => "Basso",
         Tone::DictationStart | Tone::DictationStop | Tone::Cancel => return,
     };

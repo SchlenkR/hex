@@ -1,5 +1,5 @@
 //! Retained dictation history: an owner-only, bounded, crash-safe store of
-//! successful dictation and Voice Action results.
+//! successful dictation results.
 //!
 //! History is a product record, deliberately separate from the diagnostic
 //! Activity event stream. Entries hold text and bounded metadata only; audio
@@ -70,6 +70,7 @@ impl HistoryRetention {
 pub enum HistoryKind {
     Dictation,
     Send,
+    // Retained so stores written by older releases still load.
     VoiceAction,
 }
 

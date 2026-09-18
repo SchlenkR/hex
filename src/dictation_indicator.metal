@@ -14,7 +14,6 @@ struct Uniforms {
     float processing;
     float post_processing;
     float capturing;
-    float editing;
     float queued_count;
     float line_style;
     float line_count;
@@ -27,7 +26,7 @@ struct Uniforms {
     float sphere_outline;
     float completion;
     float recording_flash;
-    float _padding;
+    float _padding[2];
 };
 
 struct VertexOutput {
@@ -91,7 +90,6 @@ fragment float4 indicator_fragment(
 
     float processing = clamp(uniforms.processing, 0.0, 1.0);
     float post_processing = clamp(uniforms.post_processing, 0.0, 1.0);
-    float editing = clamp(uniforms.editing, 0.0, 1.0);
     float completion = clamp(uniforms.completion, 0.0, 1.0);
     float recording_flash = clamp(uniforms.recording_flash, 0.0, 1.0)
         * (1.0 - processing);
@@ -100,10 +98,7 @@ fragment float4 indicator_fragment(
     float recording = 1.0 - processing;
     float circularity = 1.0 - smoothstep(0.5, 2.25, abs(uniforms.width - uniforms.height));
 
-    float3 red_accent = mix(
-        float3(1.0, 0.025, 0.035),
-        float3(0.05, 0.85, 0.58),
-        editing);
+    float3 red_accent = float3(1.0, 0.025, 0.035);
     float3 blue_accent = float3(0.1, 0.34, 1.0);
     float3 violet_accent = float3(0.64, 0.2, 1.0);
     float3 pipeline_accent = mix(blue_accent, violet_accent, post_processing);
@@ -124,7 +119,6 @@ fragment float4 indicator_fragment(
         float3(0.5, 0.0, 0.0),
         float3(1.0, 0.0, 0.0),
         average_power);
-    recording_base = mix(recording_base, float3(0.0, 0.48, 0.3), editing);
     recording_base = mix(recording_base, float3(1.0, 0.08, 0.06), recording_flash * 0.72);
     float sphere_light = clamp(0.48 - point.x * 0.035 - point.y * 0.045, 0.0, 1.0);
     float3 blue_base = mix(

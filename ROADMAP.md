@@ -1,13 +1,11 @@
 # Roadmap
 
 HEX ships the macOS product loop: configurable hold-to-talk local dictation,
-explicit selected-text voice editing, optional context-aware OpenCode
-post-processing, a Metal HUD, bounded paste workers, settings, and a signed GPUI
-app bundle. Streaming commands are a disabled-by-default experimental opt-in;
-meetings remain a developer prototype until their product surface is redesigned.
+optional context-aware OpenCode post-processing, a Metal HUD, bounded paste workers, settings, and a signed GPUI
+app bundle. Streaming commands are a disabled-by-default experimental opt-in.
 An x86_64 Arch/i3 X11 beta now provides hotkey dictation, automatic paste, a
-GPUI shell, and signed user-local updates; it does not yet include commands or
-meetings. Native wlroots-compatible Wayland and Nix packaging are implemented
+GPUI shell, and signed user-local updates; it does not yet include commands.
+Native wlroots-compatible Wayland and Nix packaging are implemented
 and awaiting supported-host validation before release.
 The authenticated local transcription service now implements discovery,
 direct-child embedding, model preparation, and bounded host-audio transcription;
@@ -68,7 +66,7 @@ future Arch package must leave updates to the package manager. Nix owns its
 packaged installation and optional Home Manager service. Validate the Wayland
 beta on a compatible compositor with physical keyboard reconnect, microphone,
 foreground paste, click-through HUD, and independent service/client shutdown. See
-[`docs/plans/linux.md`](docs/plans/linux.md). Add commands, context, meetings, or
+[`docs/plans/linux.md`](docs/plans/linux.md). Add commands, context, or
 broader Wayland support only as explicit later capability slices.
 
 Converge the separate macOS and Linux GPUI roots on one capability-driven
@@ -128,9 +126,8 @@ Track the remaining shortcut requests explicitly:
   activation needs its own hold/lock, chord-discard, and cold-microphone checks.
 - [#67](https://github.com/anomalyco/hex/issues/67): standalone keypad/character
   bindings need explicit key-consumption, cancellation, and rebinding semantics.
-- [#37](https://github.com/anomalyco/hex/issues/37): the original Voice Action
-  conflict is resolved; remaining Caps Lock-to-Control behavior needs physical
-  remapping evidence. Side-less flags and actual Right Control flags are distinct.
+- [#37](https://github.com/anomalyco/hex/issues/37): remaining Caps Lock-to-Control
+  behavior needs physical remapping evidence. Side-less flags and actual Right Control flags are distinct.
 
 On-demand rewrite [PR #63](https://github.com/anomalyco/hex/pull/63) remains under
 review: publish the shared last transcript only after successful paste, require
@@ -143,8 +140,7 @@ The microphone and dictation model remain warm by default. The shipped
 pre-roll, and adds first-capture latency. It is mutually exclusive with Commands
 through confirmed settings transitions. `Do nothing` is the default
 recording-audio behavior. Idle-sleep prevention is automatic and scoped to
-intentional dictation and active meeting capture rather than persisted as a
-user setting.
+intentional dictation rather than persisted as a user setting.
 
 Add end-of-speech detection only if it preserves explicit Send, Cancel, and
 locked-capture controls.
@@ -161,59 +157,10 @@ sleeping or discarded utterances, context mismatches, resolution misses, queue
 pressure, and action failures. Recommendations may propose command-taxonomy
 changes but must not mutate compiled configuration automatically.
 
-Authenticated developer control now rides the existing loopback API through the
-debug-only `hex dev` subcommand: it inspects app state, drives semantic HUD
-scenarios, opens/focuses panes, and toggles command mode on the GPUI thread.
-Extend the same bounded typed channel with fixture-audio capture, microphone
-recovery, model switching, permission snapshots, deterministic screenshots,
-and assertions over capture/job/UI state. MCP may wrap this protocol later; it
-must not become a second control server or settings authority.
-When that wrapper exists, publish it as a standard npm stdio package with a
-`bin` entry so clients can run it through `npx -y`, and publish matching MCP
-Registry metadata. Do not publish an MCP package before the protocol exposes a
-real supported user capability.
-
-## Generalize Context From Evidence
-
-Foreground application identity now comes from
-`NSWorkspace.frontmostApplication`, and focused window titles come from the
-bounded Accessibility bridge rather than repeated System Events scripts. Keep
-command and dictation-profile semantics expressed in application and browser-host
-terms rather than Brave-specific types.
-
-Add one real second browser adapter before extracting a generalized adapter
-framework. Candidate implementations include Chromium-family AppleScript,
-Safari AppleScript, browser extensions, or Accessibility APIs. Diagnose Slack
-Huddle detection separately from generic browser context. Capture failures
-already log a warning and invalidate the cached context. Surface context age and
-failure health in the UI rather than relying only on diagnostics.
-
 Keep installed-application discovery lazy. Opening Settings must not recursively
 scan application bundles or rasterize their icons; start that work only after
 the user opens `Add application`, and verify ordinary startup requests no
 Downloads, Calendar, or other unrelated TCC access.
-
-## Complete Meeting Lifecycle Recovery
-
-When meeting microphone activity disappears, ask `Keep Recording` or
-`Stop & Transcribe`; never stop automatically. Add EventKit correlation for
-titles and reminders, explicit input-device selection, structured capture-gap
-observations, active-WAV repair, and resumable final transcription. Status and
-final-publication recovery already exist; do not replace them.
-
-Keep active recording discoverable after the main window closes through a
-persistent menu-bar/status affordance. Add transcript search; scrolling and
-follow-live behavior are already implemented.
-
-Give durable transcript entries stable identities so live-to-final reconciliation,
-incremental UI refresh, and meeting-delta paste can advance without rereading
-broad history. Keep `You` and `Computer` source labels and the recoverable live
-draft when final transcription fails.
-
-Add end-to-end coverage for voice-triggered start/stop, shutdown during capture,
-forced final-transcription failure, and live provider detection. Evaluate
-synchronized playback, echo annotation, summarization, and person-level
-diarization only against real meeting recordings.
 
 ## Deliberate Deferrals
 

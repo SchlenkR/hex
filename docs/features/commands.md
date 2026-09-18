@@ -1,8 +1,7 @@
 # Voice Commands
 
 Opt in to spoken commands without changing ordinary hotkey dictation. Commands
-uses its own Moonshine model and awake/sleep state; it is not
-[Voice Action](voice-action.md).
+uses its own Moonshine model and awake/sleep state.
 
 This map covers macOS. Linked checks are locators, not passing runs; no tests,
 previews, providers, or native actions were run for this split.
@@ -22,8 +21,7 @@ hex listen -> Use saved command opt-in               // never beside another lis
 The catalog and config controls remain reachable while Commands is off. Sources:
 `render_commands` in [app_window.rs](../../src/app_window.rs), CLI routes in
 [main.rs](../../src/main.rs), and workspace paths in
-[app_paths.rs](../../src/app_paths.rs). Debug-only `hex dev commands on|off`
-changes the running app's opt-in; it is not a release CLI route.
+[app_paths.rs](../../src/app_paths.rs).
 
 ## Sub-features
 

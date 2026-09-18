@@ -154,13 +154,11 @@ export interface Capabilities {
   audioFormats: readonly ["audio/wav"];
   partialTranscripts: false;
   serviceCapture: false;
-  developerControl: false;
 }
 ```
 
 These capability values describe the embedded helper. The desktop local API can
-advertise capture and debug-only developer control. The SDK exposes
-`serviceCapture` as a boolean and omits the native-only `developerControl` field.
+advertise capture. The SDK exposes `serviceCapture` as a boolean.
 
 ### Models
 

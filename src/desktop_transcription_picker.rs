@@ -98,7 +98,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
         let (state_label, action, active, preparing, progress, installed) = match model.status {
             TranscriptionPickerStatus::Active => ("Active".into(), None, true, false, None, true),
             TranscriptionPickerStatus::Available { installed } => (
-                model.choice.recommendation.label().into(),
+                "Available".into(),
                 Some(if installed { "Use" } else { "Download" }),
                 false,
                 false,
@@ -367,30 +367,4 @@ fn model_metric(label: impl IntoElement, value: impl IntoElement) -> gpui::Div {
                 .text_color(rgb(TEXT))
                 .child(value),
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn automatic_language_is_a_distinct_model_selection() {
-        let model =
-            crate::transcription_models::definition(TranscriptionModelId::WhisperLargeV3Turbo);
-        let selection = TranscriptionSelection {
-            model: model.id,
-            language: crate::transcription_models::AUTO_LANGUAGE.into(),
-            recognition_hints: String::new(),
-        };
-
-        assert!(transcription_selection_is_active(
-            &selection,
-            model,
-            crate::transcription_models::AUTO_LANGUAGE,
-            true,
-        ));
-        assert!(!transcription_selection_is_active(
-            &selection, model, "en", true,
-        ));
-    }
 }
