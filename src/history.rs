@@ -74,16 +74,6 @@ pub enum HistoryKind {
     VoiceAction,
 }
 
-impl HistoryKind {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Dictation => "Dictation",
-            Self::Send => "Send",
-            Self::VoiceAction => "Voice Action",
-        }
-    }
-}
-
 /// Bounded record of the post-processing that shaped the final text.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HistoryProcessing {

@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, Bounds, Context, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight,
     IntoElement, KeyDownEvent, Modifiers as GpuiModifiers, ModifiersChangedEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, Render, SharedString,
-    Subscription, Timer, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
-    actions, deferred, div, img, prelude::*, px, relative, rgb, rgba, size,
+    MouseDownEvent, MouseMoveEvent, PathPromptOptions, Pixels, Point, Render, Subscription, Timer,
+    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, actions, deferred, div,
+    img, prelude::*, px, relative, rgb, rgba, size,
 };
 
 use crate::app_settings::{
@@ -684,7 +684,7 @@ pub struct AppWindow {
     history: Option<History>,
     history_search: ProcessingInput,
     history_entries: Vec<HistoryEntry>,
-    selected_history: Option<u64>,
+    last_copied_at: Option<Instant>,
     history_error: Option<String>,
     history_clear_armed: bool,
     history_retention_open: bool,
@@ -712,12 +712,19 @@ impl AppWindow {
                         let setup_changed = window.poll_setup(false);
                         let login_item_changed = window.poll_login_item();
                         let history_changed = window.poll_history(cx);
+                        let copied_expired = window
+                            .last_copied_at
+                            .is_some_and(|at| at.elapsed() >= Duration::from_millis(1500));
+                        if copied_expired {
+                            window.last_copied_at = None;
+                        }
                         let update_status = if window.preview {
                             window.update_status
                         } else {
                             crate::sparkle::status()
                         };
-                        let update_status_changed = window.update_status != update_status;
+                        let update_status_changed =
+                            window.update_status != update_status || copied_expired;
                         if update_status_changed {
                             window.update_status = update_status;
                             window.update_status_changed_at = Instant::now();
@@ -1010,7 +1017,7 @@ impl AppWindow {
             history,
             history_search,
             history_entries: Vec::new(),
-            selected_history: None,
+            last_copied_at: None,
             history_error: None,
             history_clear_armed: false,
             history_retention_open: preview
@@ -1022,9 +1029,6 @@ impl AppWindow {
             window.reload_events();
         }
         window.reload_history(cx);
-        if window.preview {
-            window.selected_history = window.history_entries.first().map(|entry| entry.id);
-        }
         if window.pane == Pane::Modes {
             window.ensure_application_catalog_load();
         }
@@ -1310,17 +1314,30 @@ impl AppWindow {
     fn reload_history(&mut self, cx: &App) {
         let Some(history) = &self.history else {
             self.history_entries.clear();
-            self.selected_history = None;
             return;
         };
         let query = self.history_search.entity.read(cx).text().to_string();
         self.history_entries = history.search(&query);
-        if self
-            .selected_history
-            .is_some_and(|id| !self.history_entries.iter().any(|entry| entry.id == id))
+    }
+
+    fn copy_last_dictation(&mut self, cx: &mut Context<Self>) {
+        let latest = self
+            .history
+            .as_ref()
+            .and_then(|history| history.search("").into_iter().next())
+            .or_else(|| self.history_entries.first().cloned());
+        let Some(entry) = latest else {
+            return;
+        };
+        if let Err(error) = arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(entry.final_text.clone()))
         {
-            self.selected_history = None;
+            self.history_error = Some(error.to_string());
+        } else {
+            self.last_copied_at = Some(Instant::now());
+            self.history_copied = Some(entry.id);
         }
+        cx.notify();
     }
 
     /// Refresh the visible history while the pane is open so entries recorded
@@ -1464,14 +1481,29 @@ impl AppWindow {
             .enumerate()
             .map(|(index, entry)| {
                 let id = entry.id;
-                let selected = self.selected_history == Some(id);
+                let copied = self.history_copied == Some(id);
                 let age = event_age(entry.timestamp_ms);
-                let preview = entry.final_text.replace('\n', " ");
-                let mut meta = entry.kind.label().to_string();
+                let mut meta = age;
                 if let Some(application) = &entry.application {
                     meta.push_str(" · ");
                     meta.push_str(application);
                 }
+                let row_button = |label: &'static str, id_prefix: &'static str| {
+                    div()
+                        .id((id_prefix, index))
+                        .h(px(28.0))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .bg(rgb(CANVAS))
+                        .text_size(px(11.0))
+                        .text_color(rgb(TEXT_SOFT))
+                        .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                        .child(label)
+                };
                 div()
                     .id(("history-entry", index))
                     .w_full()
@@ -1483,7 +1515,6 @@ impl AppWindow {
                     .gap_4()
                     .border_b_1()
                     .border_color(rgb(LINE))
-                    .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
                     .hover(|row| row.bg(rgb(SURFACE_HOVER)))
                     .child(
                         div()
@@ -1496,25 +1527,36 @@ impl AppWindow {
                                 div()
                                     .w_full()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(TEXT_SOFT))
                                     .line_height(px(18.0))
-                                    .truncate()
-                                    .child(preview),
+                                    .text_color(rgb(TEXT))
+                                    .child(entry.final_text.clone()),
                             )
                             .child(div().text_size(px(10.0)).text_color(rgb(FAINT)).child(meta)),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(10.0))
-                            .text_color(rgb(FAINT))
-                            .child(age),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                row_button(if copied { "Copied" } else { "Copy" }, "history-copy")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.copy_history_entry(id, cx);
+                                    })),
+                            )
+                            .child(
+                                row_button("×", "history-delete")
+                                    .px_2()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(MUTED))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.delete_history_entry(id, cx);
+                                    })),
+                            ),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_history = Some(id);
-                        this.history_clear_armed = false;
-                        cx.notify();
-                    }))
                     .into_any_element()
             })
             .collect();
@@ -1526,185 +1568,30 @@ impl AppWindow {
             .child(pane_header_with_action("History", Some(header_action)))
             .child(
                 pane_body().p_5().child(
-                    pane_content()
-                        .flex_row()
-                        .gap_5()
-                        .child(
-                            compact_panel()
-                                .id("history-list")
-                                .w(px(PANE_LIST_WIDTH))
-                                .h_full()
-                                .flex_none()
-                                .overflow_y_scroll()
-                                .when(retention_off, |list| {
-                                    list.child(empty_message(
-                                        "History is off. New dictations are not retained.",
-                                    ))
-                                })
-                                .when(
-                                    !retention_off
-                                        && self.history_entries.is_empty()
-                                        && self.history_error.is_none(),
-                                    |list| list.child(empty_message("No dictations retained yet.")),
-                                )
-                                .when_some(self.history_error.clone(), |list, error| {
-                                    list.child(error_message("History could not be loaded.", error))
-                                })
-                                .child(
-                                    div()
-                                        .w(px(PANE_LIST_WIDTH - 2.0))
-                                        .flex()
-                                        .flex_col()
-                                        .children(rows),
-                                ),
-                        )
-                        .child(
-                            compact_panel()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .h_full()
-                                .flex()
-                                .flex_col()
-                                .child(self.render_history_detail(cx)),
-                        ),
-                ),
-            )
-            .into_any_element()
-    }
-
-    fn render_history_detail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(entry) = self
-            .selected_history
-            .and_then(|id| self.history_entries.iter().find(|entry| entry.id == id))
-        else {
-            return detail_placeholder("Select a history entry.");
-        };
-        let id = entry.id;
-        let copied = self.history_copied == Some(id);
-        let show_raw = entry.raw_text.trim() != entry.final_text.trim();
-        let action_button = |label: &'static str, id_suffix: &'static str| {
-            div()
-                .id(SharedString::from(format!("history-action-{id_suffix}")))
-                .h(px(30.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded_sm()
-                .bg(rgb(SURFACE))
-                .text_size(px(12.0))
-                .text_color(rgb(TEXT_SOFT))
-                .hover(|button| button.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
-                .child(label)
-        };
-        let mut latency = format!(
-            "{} ms audio · {} ms inference",
-            entry.audio_ms, entry.inference_ms
-        );
-        if entry.total_ms > 0 {
-            latency.push_str(&format!(" · {} ms total", entry.total_ms));
-        }
-        div()
-            .id("history-detail")
-            .flex_1()
-            .min_w(px(0.0))
-            .h_full()
-            .overflow_y_scroll()
-            .px_6()
-            .py_6()
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(entry.kind.label()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(FAINT))
-                                    .child(event_age(entry.timestamp_ms)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .pt_4()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                action_button(if copied { "Copied" } else { "Copy" }, "copy")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy_history_entry(id, cx)
-                                    })),
-                            )
-                            .child(action_button("Delete", "delete").on_click(cx.listener(
-                                move |this, _, _, cx| this.delete_history_entry(id, cx),
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .mt_5()
-                            .pt_5()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .child(section_label("Final text"))
-                            .child(
-                                div()
-                                    .pt_3()
-                                    .text_size(px(12.0))
-                                    .line_height(px(19.0))
-                                    .text_color(rgb(TEXT))
-                                    .child(entry.final_text.clone()),
-                            ),
-                    )
-                    .when(show_raw, |detail| {
-                        detail.child(
-                            div()
-                                .mt_5()
-                                .pt_5()
-                                .border_t_1()
-                                .border_color(rgb(LINE))
-                                .child(section_label("Raw transcript"))
-                                .child(
-                                    div()
-                                        .pt_3()
-                                        .text_size(px(12.0))
-                                        .line_height(px(19.0))
-                                        .text_color(rgb(MUTED))
-                                        .child(entry.raw_text.clone()),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .mt_5()
-                            .pt_5()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .when_some(entry.application.clone(), |detail, application| {
-                                detail.child(detail_row("Application", application))
+                    pane_content().flex_row().gap_5().child(
+                        compact_panel()
+                            .id("history-list")
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_y_scroll()
+                            .when(retention_off, |list| {
+                                list.child(empty_message(
+                                    "History is off. New dictations are not retained.",
+                                ))
                             })
-                            .when_some(entry.processing.clone(), |detail, processing| {
-                                let mut summary = format!(
-                                    "{} · {} ms",
-                                    processing.profile, processing.latency_ms
-                                );
-                                if let Some(fallback) = &processing.fallback {
-                                    summary.push_str(&format!(" · fell back: {fallback}"));
-                                }
-                                detail.child(detail_row("Processing", summary))
+                            .when(
+                                !retention_off
+                                    && self.history_entries.is_empty()
+                                    && self.history_error.is_none(),
+                                |list| list.child(empty_message("No dictations retained yet.")),
+                            )
+                            .when_some(self.history_error.clone(), |list, error| {
+                                list.child(error_message("History could not be loaded.", error))
                             })
-                            .child(detail_row("Latency", latency)),
+                            .child(div().w_full().flex().flex_col().children(rows)),
                     ),
+                ),
             )
             .into_any_element()
     }
@@ -1731,6 +1618,32 @@ impl AppWindow {
             .flex()
             .flex_col()
             .child(div().flex().flex_col().gap(px(2.0)).children(items))
+            .child(
+                div()
+                    .id("copy-last-dictation")
+                    .mt_4()
+                    .h(px(40.0))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .bg(if self.last_copied_at.is_some() {
+                        rgb(SURFACE_SELECTED)
+                    } else {
+                        rgb(ACCENT)
+                    })
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
+                    .hover(|button| button.opacity(0.9))
+                    .child(if self.last_copied_at.is_some() {
+                        "Copied"
+                    } else {
+                        "Copy last dictation"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.copy_last_dictation(cx))),
+            )
             .child(div().flex_1())
             .child(
                 div()
