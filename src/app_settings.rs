@@ -441,6 +441,8 @@ pub struct AppSettings {
     pub release_microphone_while_idle: bool,
     pub sound_effects: bool,
     pub sound_effect_volume: f32,
+    pub start_sound: String,
+    pub stop_sound: String,
     pub microphone: Option<String>,
     pub recording_audio_behavior: RecordingAudioBehavior,
     pub double_tap_lock: bool,
@@ -465,6 +467,8 @@ impl Default for AppSettings {
             release_microphone_while_idle: false,
             sound_effects: true,
             sound_effect_volume: 0.5,
+            start_sound: crate::feedback::DEFAULT_SOUND.into(),
+            stop_sound: crate::feedback::DEFAULT_SOUND.into(),
             microphone: None,
             recording_audio_behavior: RecordingAudioBehavior::DoNothing,
             double_tap_lock: true,
@@ -603,6 +607,7 @@ impl AppSettings {
         RELEASE_MICROPHONE_WHILE_IDLE.store(self.release_microphone_while_idle, Ordering::Release);
         crate::feedback::set_enabled(self.sound_effects);
         crate::feedback::set_volume(self.sound_effect_volume.clamp(0.0, 1.0));
+        crate::feedback::set_sounds(&self.start_sound, &self.stop_sound);
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         DOUBLE_TAP_LOCK.store(self.double_tap_lock, Ordering::Relaxed);
         crate::dictation::set_minimum_hold_duration(std::time::Duration::from_millis(

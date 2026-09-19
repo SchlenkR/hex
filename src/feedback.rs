@@ -1,9 +1,10 @@
 use std::io::Cursor;
+use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
+use std::sync::{OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,89 @@ static DICTATION_PLAYER: OnceLock<SyncSender<Tone>> = OnceLock::new();
 static LOADER_STARTED: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static VOLUME: AtomicU32 = AtomicU32::new(0.5_f32.to_bits());
+static SOUND_SELECTION: OnceLock<RwLock<SoundSelection>> = OnceLock::new();
+static SOUND_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub const DEFAULT_SOUND: &str = "default";
+pub const SYSTEM_SOUNDS: &[&str] = &[
+    "Basso",
+    "Blow",
+    "Bottle",
+    "Frog",
+    "Funk",
+    "Glass",
+    "Hero",
+    "Morse",
+    "Ping",
+    "Pop",
+    "Purr",
+    "Sosumi",
+    "Submarine",
+    "Tink",
+];
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SoundSelection {
+    start: String,
+    stop: String,
+}
+
+pub fn set_sounds(start: &str, stop: &str) {
+    let selection = SoundSelection {
+        start: start.to_owned(),
+        stop: stop.to_owned(),
+    };
+    let mut current = SOUND_SELECTION
+        .get_or_init(Default::default)
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    if *current != selection {
+        *current = selection;
+        SOUND_GENERATION.fetch_add(1, Ordering::Release);
+    }
+}
+
+fn sound_selection() -> SoundSelection {
+    SOUND_SELECTION
+        .get_or_init(Default::default)
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
+
+pub fn sound_label(value: &str) -> String {
+    if value.is_empty() || value == DEFAULT_SOUND {
+        "Hex".into()
+    } else if SYSTEM_SOUNDS.contains(&value) {
+        value.into()
+    } else {
+        Path::new(value)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| value.into())
+    }
+}
+
+fn resolve_sound(value: &str, bundled: &SamplesBuffer) -> SamplesBuffer {
+    if value.is_empty() || value == DEFAULT_SOUND {
+        return bundled.clone();
+    }
+    let path = if SYSTEM_SOUNDS.contains(&value) {
+        format!("/System/Library/Sounds/{value}.aiff")
+    } else {
+        value.to_owned()
+    };
+    match std::fs::read(&path)
+        .map_err(Into::into)
+        .and_then(decode_bytes)
+    {
+        Ok(sound) => sound,
+        Err(error) => {
+            tracing::warn!(%error, path, "could not load feedback sound; using default");
+            bundled.clone()
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub fn set_enabled(enabled: bool) {
@@ -131,6 +215,10 @@ pub fn preload() -> Result<()> {
             return;
         };
         let mut output = FeedbackOutput::new();
+        let mut generation = SOUND_GENERATION.load(Ordering::Acquire);
+        let mut selection = sound_selection();
+        let mut start_sound = resolve_sound(&selection.start, &start);
+        let mut stop_sound = resolve_sound(&selection.stop, &stop);
         let open =
             || DeviceSinkBuilder::open_default_sink().wrap_err("could not open the audio output");
         let initial = output.update(sounds_enabled(), Instant::now(), open);
@@ -152,12 +240,19 @@ pub fn preload() -> Result<()> {
                 let _ = output.update(false, Instant::now(), open);
                 continue;
             }
+            let current_generation = SOUND_GENERATION.load(Ordering::Acquire);
+            if current_generation != generation {
+                generation = current_generation;
+                selection = sound_selection();
+                start_sound = resolve_sound(&selection.start, &start);
+                stop_sound = resolve_sound(&selection.stop, &stop);
+            }
             let (Some(tone), Some(sink)) = (tone, output.sink.as_ref()) else {
                 continue;
             };
             let sound = match tone {
-                Tone::DictationStart => &start,
-                Tone::DictationStop => &stop,
+                Tone::DictationStart => &start_sound,
+                Tone::DictationStop => &stop_sound,
                 Tone::Cancel => &cancel,
                 #[cfg(target_os = "macos")]
                 Tone::Error => continue,
@@ -214,6 +309,10 @@ fn play_system_sound(tone: Tone) {
 }
 
 fn decode(bytes: &'static [u8]) -> Result<SamplesBuffer> {
+    decode_bytes(bytes.to_vec())
+}
+
+fn decode_bytes(bytes: Vec<u8>) -> Result<SamplesBuffer> {
     let decoder = Decoder::new(Cursor::new(bytes)).wrap_err("could not decode feedback audio")?;
     let channels = decoder.channels();
     let sample_rate = decoder.sample_rate();
@@ -227,6 +326,15 @@ fn decode(bytes: &'static [u8]) -> Result<SamplesBuffer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_sounds_decode_as_aiff() {
+        for name in SYSTEM_SOUNDS {
+            let bytes = std::fs::read(format!("/System/Library/Sounds/{name}.aiff")).unwrap();
+            let sound = decode_bytes(bytes).unwrap();
+            assert!(sound.total_duration().unwrap() > Duration::ZERO, "{name}");
+        }
+    }
 
     #[test]
     fn timed_out_admission_still_publishes_a_usable_player() {

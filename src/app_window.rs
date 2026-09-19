@@ -473,6 +473,50 @@ enum ApplicationCatalogState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SoundSlot {
+    Start,
+    Stop,
+}
+
+impl SoundSlot {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Start => "Start sound",
+            Self::Stop => "Stop sound",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Start => "Played when a dictation begins",
+            Self::Stop => "Played when a dictation is released",
+        }
+    }
+
+    fn tone(self) -> crate::feedback::Tone {
+        match self {
+            Self::Start => crate::feedback::Tone::DictationStart,
+            Self::Stop => crate::feedback::Tone::DictationStop,
+        }
+    }
+
+    fn choice_prefix(self) -> &'static str {
+        match self {
+            Self::Start => "start-sound-choice",
+            Self::Stop => "stop-sound-choice",
+        }
+    }
+
+    fn element_id(self, suffix: &'static str) -> ElementId {
+        let prefix = match self {
+            Self::Start => "start-sound",
+            Self::Stop => "stop-sound",
+        };
+        ElementId::Name(format!("{prefix}-{suffix}").into())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HotkeyKind {
     Dictation,
     DictationAlternative(usize),
@@ -593,6 +637,7 @@ pub struct AppWindow {
     microphone_devices: Vec<String>,
     microphone_picker_open: bool,
     microphone_picker_error: Option<String>,
+    sound_picker_open: Option<SoundSlot>,
     launch_at_login_status: LoginItemStatus,
     launch_at_login_error: Option<String>,
     launch_at_login_toggle: ToggleSpring,
@@ -852,6 +897,7 @@ impl AppWindow {
             microphone_devices,
             microphone_picker_open: false,
             microphone_picker_error: None,
+            sound_picker_open: None,
             launch_at_login_status,
             launch_at_login_error,
             launch_at_login_toggle: ToggleSpring::new(
@@ -2412,6 +2458,73 @@ impl AppWindow {
         cx.notify();
     }
 
+    fn sound_setting(&self, slot: SoundSlot) -> &str {
+        match slot {
+            SoundSlot::Start => &self.settings.start_sound,
+            SoundSlot::Stop => &self.settings.stop_sound,
+        }
+    }
+
+    fn render_sound_row(&self, slot: SoundSlot, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        let label = crate::feedback::sound_label(self.sound_setting(slot));
+        settings_row(
+            slot.title(),
+            slot.description(),
+            disclosure_button(label)
+                .id(slot.element_id("setting"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.sound_picker_open = if this.sound_picker_open == Some(slot) {
+                        None
+                    } else {
+                        Some(slot)
+                    };
+                    cx.notify();
+                })),
+        )
+        .id(slot.element_id("row"))
+    }
+
+    fn render_sound_picker(&self, slot: SoundSlot, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.sound_setting(slot).to_owned();
+        let choices = std::iter::once(crate::feedback::DEFAULT_SOUND)
+            .chain(crate::feedback::SYSTEM_SOUNDS.iter().copied())
+            .collect::<Vec<_>>();
+        div()
+            .id(slot.element_id("picker"))
+            .w_full()
+            .px_4()
+            .pb_3()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .border_b_1()
+            .border_color(rgb(LINE))
+            .children(choices.into_iter().enumerate().map(|(index, choice)| {
+                let selected = current == choice;
+                div()
+                    .id((slot.choice_prefix(), index))
+                    .h(px(28.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded_sm()
+                    .text_size(px(12.0))
+                    .text_color(if selected { rgb(TEXT) } else { rgb(TEXT_SOFT) })
+                    .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
+                    .hover(|row| row.bg(rgb(SURFACE_HOVER)))
+                    .child(crate::feedback::sound_label(choice))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        match slot {
+                            SoundSlot::Start => this.settings.start_sound = choice.into(),
+                            SoundSlot::Stop => this.settings.stop_sound = choice.into(),
+                        }
+                        this.save_settings(cx);
+                        crate::feedback::play(slot.tone());
+                    }))
+            }))
+            .into_any_element()
+    }
+
     fn render_microphone_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let choices = std::iter::once(None)
             .chain(self.microphone_devices.iter().cloned().map(Some))
@@ -2626,6 +2739,12 @@ impl AppWindow {
         let microphone_picker = self
             .microphone_picker_open
             .then(|| self.render_microphone_picker(cx));
+        let start_sound_row = self.render_sound_row(SoundSlot::Start, cx);
+        let start_sound_picker = (self.sound_picker_open == Some(SoundSlot::Start))
+            .then(|| self.render_sound_picker(SoundSlot::Start, cx));
+        let stop_sound_row = self.render_sound_row(SoundSlot::Stop, cx);
+        let stop_sound_picker = (self.sound_picker_open == Some(SoundSlot::Stop))
+            .then(|| self.render_sound_picker(SoundSlot::Stop, cx));
         let sound_volume_position = self.sound_volume_spring.render_position(window);
         let sound_volume = segmented_control()
             .relative()
@@ -2996,9 +3115,12 @@ impl AppWindow {
                                             "Recording, cancellation, and error tones",
                                             sound_volume,
                                         )
-                                        .border_b_0()
                                         .id("sound-effects-setting"),
-                                    ),
+                                    )
+                                    .child(start_sound_row)
+                                    .children(start_sound_picker)
+                                    .child(stop_sound_row.border_b_0())
+                                    .children(stop_sound_picker),
                             )
                              .children(microphone_picker),
         )
