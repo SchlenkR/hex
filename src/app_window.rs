@@ -54,7 +54,7 @@ use crate::text_input::{
 };
 use crate::transcription_models::{
     ModelDefinition, ModelRuntime, TranscriptionModelId, TranscriptionSelection, definition,
-    language_name, validate,
+    validate,
 };
 use crate::transcription_preparation::{PreparationStatus, TranscriptionPreparation};
 
@@ -2712,11 +2712,7 @@ impl AppWindow {
         let alternative_controls = self.render_dictation_hotkey_alternatives(window, cx);
         let paste_last_control = self.render_hotkey_control(HotkeyKind::PasteLast, window, cx);
         let transcription_model = definition(self.settings.transcription.model);
-        let transcription_label = format!(
-            "{} · {}",
-            language_name(&self.settings.transcription.language),
-            transcription_model.name
-        );
+        let transcription_label = transcription_model.name.to_owned();
         let transcription_control = disclosure_button(transcription_label)
             .id("transcription-model-setting")
             .on_click(cx.listener(|this, _, _, cx| {
@@ -4803,15 +4799,6 @@ impl TranscriptionPickerDelegate for AppWindow {
 
     fn dismiss_transcription_picker(&mut self, cx: &mut Context<Self>) {
         AppWindow::dismiss_transcription_picker(self, cx);
-    }
-
-    fn select_transcription_language(&mut self, language: String, cx: &mut Context<Self>) {
-        if self.transcription_picker_language.as_deref() != Some(&language) {
-            self.cancel_transcription_download();
-            self.transcription_picker_language = Some(language);
-            self.clear_transcription_error();
-            cx.notify();
-        }
     }
 }
 

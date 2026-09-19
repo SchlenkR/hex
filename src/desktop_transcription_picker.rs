@@ -3,11 +3,11 @@ use gpui::{
 };
 
 use crate::desktop_ui::{
-    ACCENT, CANVAS, FAINT, LINE, MUTED, PANEL_RADIUS, SIDEBAR, SURFACE, SURFACE_HOVER,
-    SURFACE_SELECTED, TEXT, TEXT_SOFT, error_message,
+    ACCENT, CANVAS, FAINT, LINE, MUTED, PANEL_RADIUS, SURFACE, SURFACE_HOVER, SURFACE_SELECTED,
+    TEXT, TEXT_SOFT, error_message,
 };
 use crate::transcription_models::{
-    ModelChoice, ModelDefinition, TranscriptionModelId, TranscriptionSelection, language_name,
+    ModelChoice, ModelDefinition, TranscriptionModelId, TranscriptionSelection,
 };
 
 pub(crate) fn transcription_selection_is_active(
@@ -59,39 +59,12 @@ pub(crate) trait TranscriptionPickerDelegate: Sized + 'static {
         cx: &mut Context<Self>,
     );
     fn dismiss_transcription_picker(&mut self, cx: &mut Context<Self>);
-    fn select_transcription_language(&mut self, language: String, cx: &mut Context<Self>);
 }
 
 pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
     view: TranscriptionPickerView,
     cx: &mut Context<T>,
 ) -> AnyElement {
-    let selected_language = view.language.clone();
-    let language_rows = crate::transcription_models::LANGUAGES
-        .iter()
-        .enumerate()
-        .map(|(index, (code, name))| {
-            let selected = *code == selected_language;
-            let code = (*code).to_string();
-            div()
-                .id(("transcription-language", index))
-                .h(px(34.0))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded(px(6.0))
-                .text_size(px(13.0))
-                .text_color(if selected { rgb(TEXT) } else { rgb(MUTED) })
-                .when(selected, |row| row.bg(rgb(SURFACE_SELECTED)))
-                .when(!selected, |row| {
-                    row.hover(|row| row.bg(rgb(0x2a2a2a)).text_color(rgb(TEXT_SOFT)))
-                })
-                .child(*name)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.select_transcription_language(code.clone(), cx);
-                }))
-        });
     let model_cards = view.models.into_iter().enumerate().map(|(index, model)| {
         let language = view.language.clone();
         let definition = model.choice.model;
@@ -109,14 +82,10 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                 (label, Some("Cancel"), false, true, progress, false)
             }
         };
-        let mut metadata = if definition.coverage == language_name(&language) {
-            format!("{} · {}", definition.quality_context, definition.timestamps)
-        } else {
-            format!(
-                "{} · {} · {}",
-                definition.coverage, definition.quality_context, definition.timestamps
-            )
-        };
+        let mut metadata = format!(
+            "{} · {} · {}",
+            definition.coverage, definition.quality_context, definition.timestamps
+        );
         if installed && !active {
             metadata.push_str(" · Installed");
         }
@@ -268,7 +237,7 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
         .child(
             div()
                 .id("transcription-picker")
-                .w(px(780.0))
+                .w(px(560.0))
                 .h(px(520.0))
                 .flex()
                 .flex_col()
@@ -288,51 +257,23 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                             div()
                                 .text_size(px(18.0))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Choose local transcription"),
-                        )
-                        .child(
-                            div()
-                                .pt_1()
-                                .text_size(px(12.0))
-                                .text_color(rgb(MUTED))
-                                .child(
-                                    "Select what you speak; HEX recommends the best supported models.",
-                                ),
+                                .child("Speech model"),
                         ),
                 )
                 .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .id("transcription-language-list")
-                                .w(px(220.0))
-                                .h_full()
-                                .p_4()
-                                .overflow_y_scroll()
-                                .bg(rgb(SIDEBAR))
-                                .border_r_1()
-                                .border_color(rgb(LINE))
-                                .children(language_rows),
-                        )
-                        .child(
-                            div()
-                                .id("transcription-model-list")
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .p_5()
-                                .overflow_y_scroll()
-                                .children(model_cards)
-                                .when_some(view.error, |list, error| {
-                                    list.child(error_message(
-                                        "Model could not be installed.",
-                                        error,
-                                    ))
-                                }),
-                        ),
+                    div().flex_1().flex().overflow_hidden().child(
+                        div()
+                            .id("transcription-model-list")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .p_5()
+                            .overflow_y_scroll()
+                            .children(model_cards)
+                            .when_some(view.error, |list, error| {
+                                list.child(error_message("Model could not be installed.", error))
+                            }),
+                    ),
                 ),
         )
         .into_any_element()

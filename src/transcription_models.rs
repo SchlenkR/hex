@@ -321,12 +321,8 @@ pub fn language_name(code: &str) -> &str {
         .unwrap_or(code)
 }
 
-pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
-    MODELS
-        .iter()
-        .filter(|model| model.supports_language(language))
-        .map(|model| ModelChoice { model })
-        .collect()
+pub(crate) fn choices_for_runtime(_language: &str) -> Vec<ModelChoice> {
+    MODELS.iter().map(|model| ModelChoice { model }).collect()
 }
 
 pub fn validate(selection: &TranscriptionSelection) -> Result<&'static ModelDefinition> {
