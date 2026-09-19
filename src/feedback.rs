@@ -46,6 +46,26 @@ pub const SYSTEM_SOUNDS: &[&str] = &[
     "Tink",
 ];
 
+pub const BUNDLED_SOUNDS: &[(&str, &[u8])] = &[
+    ("Blip", include_bytes!("../resources/audio/subtle/Blip.wav")),
+    ("Tick", include_bytes!("../resources/audio/subtle/Tick.wav")),
+    (
+        "Chime",
+        include_bytes!("../resources/audio/subtle/Chime.wav"),
+    ),
+    ("Drop", include_bytes!("../resources/audio/subtle/Drop.wav")),
+    (
+        "Marimba",
+        include_bytes!("../resources/audio/subtle/Marimba.wav"),
+    ),
+];
+
+fn bundled_sound(name: &str) -> Option<&'static [u8]> {
+    BUNDLED_SOUNDS
+        .iter()
+        .find_map(|(candidate, bytes)| (*candidate == name).then_some(*bytes))
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct SoundSelection {
     start: String,
@@ -78,7 +98,7 @@ fn sound_selection() -> SoundSelection {
 pub fn sound_label(value: &str) -> String {
     if value.is_empty() || value == DEFAULT_SOUND {
         "Hex".into()
-    } else if SYSTEM_SOUNDS.contains(&value) {
+    } else if SYSTEM_SOUNDS.contains(&value) || bundled_sound(value).is_some() {
         value.into()
     } else {
         Path::new(value)
@@ -91,6 +111,9 @@ pub fn sound_label(value: &str) -> String {
 fn resolve_sound(value: &str, bundled: &SamplesBuffer) -> SamplesBuffer {
     if value.is_empty() || value == DEFAULT_SOUND {
         return bundled.clone();
+    }
+    if let Some(bytes) = bundled_sound(value) {
+        return decode(bytes).unwrap_or_else(|_| bundled.clone());
     }
     let path = if SYSTEM_SOUNDS.contains(&value) {
         format!("/System/Library/Sounds/{value}.aiff")
@@ -326,6 +349,14 @@ fn decode_bytes(bytes: Vec<u8>) -> Result<SamplesBuffer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_subtle_sounds_decode() {
+        for (name, bytes) in BUNDLED_SOUNDS {
+            let sound = decode(bytes).unwrap();
+            assert!(sound.total_duration().unwrap() > Duration::ZERO, "{name}");
+        }
+    }
 
     #[test]
     fn system_sounds_decode_as_aiff() {

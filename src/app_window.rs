@@ -2487,6 +2487,11 @@ impl AppWindow {
     fn render_sound_picker(&self, slot: SoundSlot, cx: &mut Context<Self>) -> AnyElement {
         let current = self.sound_setting(slot).to_owned();
         let choices = std::iter::once(crate::feedback::DEFAULT_SOUND)
+            .chain(
+                crate::feedback::BUNDLED_SOUNDS
+                    .iter()
+                    .map(|(name, _)| *name),
+            )
             .chain(crate::feedback::SYSTEM_SOUNDS.iter().copied())
             .collect::<Vec<_>>();
         div()

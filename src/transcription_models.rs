@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 pub enum TranscriptionModelId {
     #[default]
     ParakeetV3,
+    ParakeetPrimeline,
     AppleSpeech,
 }
 
@@ -25,6 +26,7 @@ impl TranscriptionModelId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ParakeetV3 => "parakeet_v3",
+            Self::ParakeetPrimeline => "parakeet_primeline",
             Self::AppleSpeech => "apple_speech",
         }
     }
@@ -36,6 +38,7 @@ impl FromStr for TranscriptionModelId {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "parakeet_v3" => Ok(Self::ParakeetV3),
+            "parakeet_primeline" => Ok(Self::ParakeetPrimeline),
             "apple_speech" => Ok(Self::AppleSpeech),
             _ => bail!("unknown transcription model: {value}"),
         }
@@ -200,6 +203,16 @@ const PARAKEET_V3_ARTIFACT: GgufArtifact = GgufArtifact {
     variant: "tdt-0.6b-v3",
 };
 
+const PARAKEET_PRIMELINE_ARTIFACT: GgufArtifact = GgufArtifact {
+    filename: "parakeet-primeline-Q8_0.gguf",
+    revision: "7c63545b352e5d410ccc1ea1eb49aa751e65780b",
+    repository: "handy-computer/parakeet-primeline-gguf",
+    bytes: 739_508_640,
+    sha256: "dbd1ec2985aea64d16550a0068ea9153c0bc01955bf2a5c18b74ca213546d3cd",
+    architecture: "parakeet",
+    variant: "tdt-0.6b-primeline",
+};
+
 pub const MODELS: &[ModelDefinition] = &[
     ModelDefinition {
         id: TranscriptionModelId::ParakeetV3,
@@ -213,6 +226,21 @@ pub const MODELS: &[ModelDefinition] = &[
         runtime: ModelRuntime::Gguf(&PARAKEET_V3_ARTIFACT),
         languages: PARAKEET_V3_LANGUAGES,
         // The pinned v3 artifact detects language from audio and has no prompt input.
+        accepts_language_hint: false,
+        supports_language_detection: false,
+        supports_recognition_hints: false,
+    },
+    ModelDefinition {
+        id: TranscriptionModelId::ParakeetPrimeline,
+        name: "Parakeet v3 Primeline (Deutsch)",
+        realtime: "~33x",
+        realtime_context: "local speed · M2 Max",
+        quality: "5.98%",
+        quality_context: "German FLEURS benchmark",
+        coverage: "German fine-tune",
+        timestamps: "Token timestamps",
+        runtime: ModelRuntime::Gguf(&PARAKEET_PRIMELINE_ARTIFACT),
+        languages: PARAKEET_V3_LANGUAGES,
         accepts_language_hint: false,
         supports_language_detection: false,
         supports_recognition_hints: false,

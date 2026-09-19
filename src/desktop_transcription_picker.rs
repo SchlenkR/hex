@@ -184,18 +184,6 @@ pub(crate) fn render_transcription_picker<T: TranscriptionPickerDelegate>(
                         definition.quality,
                     )),
             )
-            .when(definition.id == TranscriptionModelId::ParakeetV3, |card| {
-                card.child(
-                    div()
-                        .pt_3()
-                        .text_size(px(12.0))
-                        .text_color(rgb(MUTED))
-                        .child(
-                            "Detects language from audio, not the selected language. \
-                             For language-guided transcription, try Whisper.",
-                        ),
-                )
-            })
             .when_some(progress, |card, progress| {
                 let indicator = match progress {
                     TranscriptionPickerProgress::Downloading(progress) => div()
