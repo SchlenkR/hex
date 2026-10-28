@@ -17,6 +17,7 @@ const MAX_SAMPLE_RATE: u32 = 192_000;
 const MAX_CHANNELS: u16 = 8;
 const MAX_NORMALIZED_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NORMALIZED_SAMPLES: usize = MAX_NORMALIZED_AUDIO_BYTES / size_of::<f32>();
+const IDLE_MODEL_RELEASE: Duration = Duration::from_secs(5 * 60);
 
 pub struct TranscriptionService {
     commands: Option<SyncSender<Command>>,
@@ -287,7 +288,17 @@ where
 fn run(commands: Receiver<Command>) {
     crate::parakeet::prioritize_inference_thread();
     let mut active = WarmTranscriber::default();
-    while let Ok(command) = commands.recv() {
+    loop {
+        let command = match commands.recv_timeout(IDLE_MODEL_RELEASE) {
+            Ok(command) => command,
+            Err(RecvTimeoutError::Timeout) => {
+                if active.release() {
+                    tracing::info!("released idle local API transcription model");
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         match command {
             Command::Prepare {
                 selection,

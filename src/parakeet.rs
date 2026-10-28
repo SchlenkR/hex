@@ -403,6 +403,7 @@ impl DictationWorker {
                     })
                     .map_err(|error| error.to_string());
                 let inference_ms = inference_started.elapsed().as_millis();
+                crate::system_load::report_slow_inference(audio_ms, inference_ms);
                 if job.control.is_cancelled() {
                     let _ = inference_output.send(OutputJob::Cancelled { job_id: job.job_id });
                     continue;

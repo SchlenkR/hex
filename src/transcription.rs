@@ -82,6 +82,10 @@ impl WarmTranscriber {
             .as_mut()
             .expect("activated transcriber must be available"))
     }
+
+    pub fn release(&mut self) -> bool {
+        self.active.take().is_some()
+    }
 }
 
 #[cfg(test)]
