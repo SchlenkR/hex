@@ -20,6 +20,7 @@ pub enum TranscriptionModelId {
     ParakeetUnifiedEnglish,
     ParakeetV2,
     ParakeetV3,
+    ParakeetPrimeline,
     WhisperLargeV3Turbo,
     Qwen3Asr06B,
     SenseVoiceSmall,
@@ -33,6 +34,7 @@ impl TranscriptionModelId {
             Self::ParakeetUnifiedEnglish => "parakeet_unified_en",
             Self::ParakeetV2 => "parakeet_v2",
             Self::ParakeetV3 => "parakeet_v3",
+            Self::ParakeetPrimeline => "parakeet_primeline",
             Self::WhisperLargeV3Turbo => "whisper_large_v3_turbo",
             Self::Qwen3Asr06B => "qwen3_asr06_b",
             Self::SenseVoiceSmall => "sense_voice_small",
@@ -50,6 +52,7 @@ impl FromStr for TranscriptionModelId {
             "parakeet_unified_en" => Ok(Self::ParakeetUnifiedEnglish),
             "parakeet_v2" => Ok(Self::ParakeetV2),
             "parakeet_v3" => Ok(Self::ParakeetV3),
+            "parakeet_primeline" => Ok(Self::ParakeetPrimeline),
             "whisper_large_v3_turbo" => Ok(Self::WhisperLargeV3Turbo),
             "qwen3_asr06_b" => Ok(Self::Qwen3Asr06B),
             "sense_voice_small" => Ok(Self::SenseVoiceSmall),
@@ -282,6 +285,15 @@ const PARAKEET_V3_ARTIFACT: GgufArtifact = GgufArtifact {
     architecture: "parakeet",
     variant: "tdt-0.6b-v3",
 };
+const PARAKEET_PRIMELINE_ARTIFACT: GgufArtifact = GgufArtifact {
+    filename: "parakeet-primeline-Q8_0.gguf",
+    revision: "7c63545b352e5d410ccc1ea1eb49aa751e65780b",
+    repository: "handy-computer/parakeet-primeline-gguf",
+    bytes: 739_508_640,
+    sha256: "dbd1ec2985aea64d16550a0068ea9153c0bc01955bf2a5c18b74ca213546d3cd",
+    architecture: "parakeet",
+    variant: "tdt-0.6b-primeline",
+};
 const WHISPER_ARTIFACT: GgufArtifact = GgufArtifact {
     filename: "whisper-large-v3-turbo-Q8_0.gguf",
     revision: "d222c9f621c1128299248f2ded4d8a1820519780",
@@ -362,6 +374,21 @@ pub const MODELS: &[ModelDefinition] = &[
         runtime: ModelRuntime::Gguf(&PARAKEET_V3_ARTIFACT),
         languages: PARAKEET_V3_LANGUAGES,
         // The pinned v3 artifact detects language from audio and has no prompt input.
+        accepts_language_hint: false,
+        supports_language_detection: false,
+        supports_recognition_hints: false,
+    },
+    ModelDefinition {
+        id: TranscriptionModelId::ParakeetPrimeline,
+        name: "Parakeet v3 Primeline",
+        realtime: "~33x",
+        word_error_rate: Some(5.98),
+        quality_context: "German benchmark",
+        coverage: "German",
+        timestamps: "Token timestamps",
+        streams: false,
+        runtime: ModelRuntime::Gguf(&PARAKEET_PRIMELINE_ARTIFACT),
+        languages: &["de"],
         accepts_language_hint: false,
         supports_language_detection: false,
         supports_recognition_hints: false,
@@ -505,8 +532,8 @@ pub fn language_name(code: &str) -> &str {
 pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
     use Recommendation::{Fastest, MostAccurate, RecognitionHints, Recommended};
     use TranscriptionModelId::{
-        CohereTranscribe, ParakeetUnifiedEnglish, ParakeetV3, Qwen3Asr06B, SenseVoiceSmall,
-        WhisperLargeV3Turbo,
+        CohereTranscribe, ParakeetPrimeline, ParakeetUnifiedEnglish, ParakeetV3, Qwen3Asr06B,
+        SenseVoiceSmall, WhisperLargeV3Turbo,
     };
     let choices: &[(TranscriptionModelId, Recommendation)] = match language {
         AUTO_LANGUAGE => &[(WhisperLargeV3Turbo, Recommended), (Qwen3Asr06B, Fastest)],
@@ -534,6 +561,11 @@ pub(crate) fn choices_for_runtime(language: &str) -> Vec<ModelChoice> {
         ],
         "fi" | "sv" | "da" => &[(WhisperLargeV3Turbo, Recommended), (ParakeetV3, Fastest)],
         "mt" => &[(ParakeetV3, Recommended)],
+        "de" => &[
+            (ParakeetV3, Recommended),
+            (ParakeetPrimeline, MostAccurate),
+            (WhisperLargeV3Turbo, RecognitionHints),
+        ],
         "ar" => &[
             (WhisperLargeV3Turbo, Recommended),
             (CohereTranscribe, MostAccurate),
@@ -1234,6 +1266,10 @@ mod tests {
             (TranscriptionModelId::ParakeetV2, "parakeet_v2"),
             (TranscriptionModelId::ParakeetV3, "parakeet_v3"),
             (
+                TranscriptionModelId::ParakeetPrimeline,
+                "parakeet_primeline",
+            ),
+            (
                 TranscriptionModelId::WhisperLargeV3Turbo,
                 "whisper_large_v3_turbo",
             ),
@@ -1319,6 +1355,21 @@ mod tests {
                 .iter()
                 .all(|choice| choice.model.id != TranscriptionModelId::SenseVoiceSmall)
         );
+    }
+
+    #[test]
+    fn german_offers_the_primeline_fine_tune_as_most_accurate() {
+        use Recommendation::{MostAccurate, RecognitionHints, Recommended};
+        use TranscriptionModelId::{ParakeetPrimeline, ParakeetV3, WhisperLargeV3Turbo};
+        assert_eq!(
+            routing("de"),
+            [
+                (ParakeetV3, Recommended),
+                (ParakeetPrimeline, MostAccurate),
+                (WhisperLargeV3Turbo, RecognitionHints)
+            ]
+        );
+        assert!(!definition(ParakeetPrimeline).supports_language("en"));
     }
 
     fn routing(language: &str) -> Vec<(TranscriptionModelId, Recommendation)> {

@@ -146,6 +146,8 @@ mod spring;
 mod status_item;
 #[cfg(target_os = "macos")]
 mod suppression;
+#[cfg(target_os = "macos")]
+mod system_load;
 mod text_replacements;
 #[cfg(target_os = "macos")]
 mod transcript_cli;

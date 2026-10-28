@@ -9,12 +9,19 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 # HEX_LOCAL_BUILD=1 marks a build made from a checkout for its owner's own
 # machine (Developer ID signed as usual): it shows "Local build · updates off"
 # with its commit and never checks for or offers updates.
+# HEX_LOCAL_CODESIGN_IDENTITY signs a local build with that identity (for
+# example a self-signed certificate) instead of a Developer ID.
 # HEX_RELEASE_UNSIGNED=1 builds the release app (Hex, anomaly.hex) ad-hoc
 # signed: the Release workflow's build job, which holds no credentials. Its
 # sign-macos job signs it with the Developer ID (.github/release/sign-macos.sh).
 if [ "${HEX_RELEASE_UNSIGNED:-}" = 1 ]; then
   team_id=
   identity=-
+  app_name=Hex
+  bundle_id=anomaly.hex
+elif [ -n "${HEX_LOCAL_CODESIGN_IDENTITY:-}" ]; then
+  team_id=
+  identity=$HEX_LOCAL_CODESIGN_IDENTITY
   app_name=Hex
   bundle_id=anomaly.hex
 elif [ "${HEX_TEST_BUILD:-}" = 1 ]; then
@@ -56,6 +63,8 @@ frameworks="$bundle/Contents/Frameworks"
 sign() {
   if [ "$identity" = - ]; then
     codesign --force --sign - "$@"
+  elif [ -n "${HEX_LOCAL_CODESIGN_IDENTITY:-}" ]; then
+    codesign --force --options runtime --sign "$identity" "$@"
   else
     codesign --force --timestamp --options runtime --sign "$identity" "$@"
   fi
@@ -92,7 +101,7 @@ if [ -n "$capture" ]; then
 fi
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
 cp "$root/LICENSE" "$root/THIRD_PARTY_NOTICES.md" "$bundle/Contents/Resources/"
-HEX_VERSION="$version" HEX_BUILD_NUMBER="$build_number" VOICE_CONTROL_TEAM_ID="$team_id" VOICE_CONTROL_CODESIGN_IDENTITY="${identity#-}" HEX_SKIP_INSTALL_SCRIPT=1 \
+HEX_VERSION="$version" HEX_BUILD_NUMBER="$build_number" VOICE_CONTROL_TEAM_ID="$team_id" VOICE_CONTROL_CODESIGN_IDENTITY="${team_id:+${identity#-}}" HEX_SKIP_INSTALL_SCRIPT=1 \
   "$root/scripts/build-hex-microphone-driver.sh" "$bundle/Contents/Library" >&2
 (cd "$root/sdk/commands" && bun run build)
 mkdir -p "$bundle/Contents/Resources/commands-sdk"

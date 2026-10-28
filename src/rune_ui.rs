@@ -463,8 +463,10 @@ impl Pane {
         let caps = ui.platform.caps;
         match self {
             Pane::Modes => ui.platform.modes,
-            Pane::Commands => caps.commands,
-            Pane::Meetings => caps.meetings,
+            // Fork: opt-in features stay out of the sidebar until turned on elsewhere.
+            Pane::VoiceAction => ui.settings.voice_action.enabled,
+            Pane::Commands => caps.commands && ui.settings.commands_enabled,
+            Pane::Meetings => caps.meetings && ui.settings.meetings.enabled,
             Pane::VoiceFilter => {
                 caps.fun
                     && ui.settings.experimental.voice_filter_enabled(

@@ -864,6 +864,7 @@ fn run_inference_worker(
             prepare_ms: job.prepare_ms,
             inference_ms: inference_started.elapsed().as_millis(),
         };
+        crate::system_load::report_slow_inference(audio_ms, timings.inference_ms);
         if job.control.is_cancelled() {
             let _ = output.send(OutputJob::Cancelled { job_id: job.job_id });
             continue;

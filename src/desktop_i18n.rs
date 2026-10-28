@@ -713,6 +713,8 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Apple managed", ["Zarządzany przez Apple", "由 Apple 管理", "Apple が管理", "Von Apple verwaltet", "Gestionado por Apple"]),
     ("English benchmark", ["Test dla angielskiego", "英语基准测试", "英語ベンチマーク", "Englisch-Benchmark", "Prueba en inglés"]),
     ("Mandarin benchmark", ["Test dla mandaryńskiego", "普通话基准测试", "中国語（普通話）ベンチマーク", "Mandarin-Benchmark", "Prueba en mandarín"]),
+    ("German", ["Niemiecki", "德语", "ドイツ語", "Deutsch", "Alemán"]),
+    ("German benchmark", ["Test dla niemieckiego", "德语基准测试", "ドイツ語ベンチマーク", "Deutsch-Benchmark", "Prueba en alemán"]),
     ("On device", ["Na urządzeniu", "设备端", "デバイス上", "Auf dem Gerät", "En el dispositivo"]),
     ("No timestamps", ["Bez znaczników czasu", "无时间戳", "タイムスタンプなし", "Keine Zeitstempel", "Sin marcas de tiempo"]),
     ("Segment timestamps", ["Znaczniki czasu segmentów", "分段时间戳", "セグメントのタイムスタンプ", "Segment-Zeitstempel", "Marcas de tiempo por segmento"]),
