@@ -1308,6 +1308,27 @@ fn sidebar(ui: &Ui, p: Paint) -> El {
                 move |ui: &mut Ui, _| ui.send(Request::Desktop(action.clone())),
             ))
     });
+    let copy_last = ui.history.has_store().then(|| {
+        row()
+            .key("sidebar-copy-last-control")
+            .pl(6.0)
+            .child(controls::button(
+                p,
+                "sidebar-copy-last",
+                if ui.history.last_copied() {
+                    tr("Copied")
+                } else {
+                    tr("Copy last dictation")
+                },
+                controls::ButtonKind::Secondary,
+                |ui: &mut Ui, tx: &mut Tx| {
+                    if let Some(text) = ui.history.copy_last() {
+                        tx.copy(text);
+                        tx.wake_after(history::LAST_COPIED_FEEDBACK);
+                    }
+                },
+            ))
+    });
     title_bar(col())
         .key("sidebar")
         .role("navigation")
@@ -1319,6 +1340,7 @@ fn sidebar(ui: &Ui, p: Paint) -> El {
         .pr(6.0)
         .child(nav)
         .child(el().key("spacer").grow(1.0))
+        .children(copy_last)
         .children(update)
         .children(host::QUIT_IN_WINDOW.then(|| quit_item(p)))
         .child(footer(ui, p))

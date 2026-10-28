@@ -366,6 +366,7 @@ const TRANSLATIONS: &[(&str, [&str; 5])] = &[
     ("Really clear all?", ["Na pewno wyczyścić?", "确定全部清除？", "本当にすべて消去？", "Wirklich alle löschen?", "¿Borrar todo?"]),
     ("Copy", ["Kopiuj", "复制", "コピー", "Kopieren", "Copiar"]),
     ("Copied", ["Skopiowano", "已复制", "コピーしました", "Kopiert", "Copiado"]),
+    ("Copy last dictation", ["Kopiuj ostatnie dyktowanie", "复制上次听写", "前回の音声入力をコピー", "Letztes Diktat kopieren", "Copiar el último dictado"]),
     ("Copy new", ["Kopiuj nowe", "复制新内容", "新しい分をコピー", "Neues kopieren", "Copiar lo nuevo"]),
     ("Copy new ({})", ["Kopiuj nowe ({})", "复制新内容（{}）", "新しい分をコピー（{}）", "Neues kopieren ({})", "Copiar lo nuevo ({})"]),
     ("Copy all", ["Kopiuj wszystko", "全部复制", "すべてコピー", "Alles kopieren", "Copiar todo"]),

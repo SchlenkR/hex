@@ -2,6 +2,8 @@
 //! retention choice, two-step Clear all, and a detail view with Copy and
 //! Delete. It shares the host's store, which the listener records into.
 
+use std::time::{Duration, Instant};
+
 use rune::{El, TextEdit, Tx, col, row, text};
 use rune_kit::{Select, SelectAppearance, TextInput};
 
@@ -10,6 +12,8 @@ use super::lists::{message, placeholder, section_label, source_item, source_list
 use super::{Menu, Ui};
 use crate::desktop_i18n::{event_age, tr, tr_fill, tr_named};
 use crate::history::{History, HistoryEntry, HistoryKind, HistoryRetention};
+
+pub(super) const LAST_COPIED_FEEDBACK: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(super) struct HistoryPane {
@@ -21,6 +25,7 @@ pub(super) struct HistoryPane {
     pub(super) selected: Option<u64>,
     pub(super) clear_armed: bool,
     pub(super) copied: Option<u64>,
+    last_copied_at: Option<Instant>,
     error: Option<String>,
 }
 
@@ -53,12 +58,34 @@ impl HistoryPane {
 
     /// While the pane shows, picks up new dictations and search edits.
     pub(super) fn poll(&mut self, visible: bool) -> bool {
+        let feedback_expired = self
+            .last_copied_at
+            .is_some_and(|at| at.elapsed() >= LAST_COPIED_FEEDBACK);
+        if feedback_expired {
+            self.last_copied_at = None;
+        }
         if !visible || self.store.is_none() {
-            return false;
+            return feedback_expired;
         }
         let previous = std::mem::take(&mut self.entries);
         self.reload();
-        self.entries != previous
+        self.entries != previous || feedback_expired
+    }
+
+    pub(super) fn has_store(&self) -> bool {
+        self.store.is_some()
+    }
+
+    pub(super) fn last_copied(&self) -> bool {
+        self.last_copied_at.is_some()
+    }
+
+    /// The newest dictation's text, marking it copied.
+    pub(super) fn copy_last(&mut self) -> Option<String> {
+        let entry = self.store.as_ref()?.search("").into_iter().next()?;
+        self.copied = Some(entry.id);
+        self.last_copied_at = Some(Instant::now());
+        Some(entry.final_text)
     }
 
     fn entry(&self, id: u64) -> Option<&HistoryEntry> {

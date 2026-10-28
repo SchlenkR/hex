@@ -12,6 +12,8 @@ upstream merges stay cheap. Prefer upstream behavior over fork code.
   German choice.
 - `src/system_load.rs`: slow dictation inference is logged with GPU
   utilization and memory pressure.
+- Sidebar: "Copy last dictation" button above the footer
+  (`HistoryPane::copy_last` in `src/rune_ui/history.rs`).
 - Sidebar: Voice Action, Commands, and Meetings panes are hidden until the
   feature is turned on (`hex settings`).
 
